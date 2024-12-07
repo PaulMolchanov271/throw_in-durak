@@ -5,8 +5,8 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
-#define SERVER_IP "127.0.0.1"  // Replace with the server's IP
-#define SERVER_PORT 5555
+#define SERVER_IP 
+#define SERVER_PORT 
 #define BUFFER_SIZE 1024
 
 // Function to handle reading messages from the server
