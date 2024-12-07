@@ -6,7 +6,7 @@
 #include <pthread.h>
 
 #define SERVER_IP 
-#define SERVER_PORT 
+#define SERVER_PORT
 #define BUFFER_SIZE 1024
 
 // Function to handle reading messages from the server
