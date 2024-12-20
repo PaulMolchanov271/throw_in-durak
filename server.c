@@ -67,7 +67,8 @@ struct game_session {
     int trump_card;
     int table_card_count;
     int table_cards[MAX_CARDS];
-    //char highlighted_cards[52];
+    int card_queue[25];
+    int queue_len;
 };
 
 struct server_str {
@@ -201,12 +202,6 @@ static void execute_list(struct server_str* serv, struct client_session *sess)
             free(centered_name);
             free(centered_player_count);
             free(centered_is_started);
-            /*snprintf(message, sizeof(message),
-                     " %-8s | %-17s | %-12s | %-10s |\n",
-                     center_text(id_str, 8),          // ID
-                     center_text(name, 17),          // Game Name
-                     center_text(player_count_str, 12), // Player Count
-                     center_text(is_started_str, 10));*/
             session_send_string(sess->sd, message);
         }
     }
@@ -406,7 +401,7 @@ void send_table(struct server_str *serv, struct game_session *game, struct clien
         session_send_string(game->players[i]->sd, "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
         offset = 0;
         for (j = 0; j < game->player_count; j++) {
-            if(sess->sd == game->players[j]->sd) {
+            if(game->players[i]->sd == game->players[j]->sd) {
                 continue;
             }
             offset += snprintf(buffer + offset, sizeof(buffer) - offset, " <%d>  ", game->players[j]->player_info->card_count);
@@ -429,7 +424,6 @@ void send_table(struct server_str *serv, struct game_session *game, struct clien
             offset += snprintf(buffer + offset, sizeof(buffer) - offset, "\n");
         }
 
-        //offset += snprintf(buffer + offset, sizeof(buffer) - offset, "> ");
         for (j = 0; j < game->players[i]->player_info->card_count; j++) {
             char card_str[4];
             format_card(game->players[i]->player_info->hand[j], card_str);
@@ -437,15 +431,16 @@ void send_table(struct server_str *serv, struct game_session *game, struct clien
         }
         offset += snprintf(buffer + offset, sizeof(buffer) - offset, "\n");
 
-        if ((game->players[i]->sd == game->defending_player->sd) && ((game->table_card_count % 2) != 0) && (game->defense_player->player_info->card_count > 0)) {
+        if ((game->players[i]->sd == game->defending_player->sd) && ((game->table_card_count % 2) != 0) && (game->defending_player->player_info->card_count > 0)) {
             cards = what_cards_can_be_placed(game->players[i], game, "defense");
             offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%s => ", cards);
-        } else if ((game->players[i]->sd == game->attacking_player->sd) && ((game->table_card_count % 2) == 0) && (game->defense_player->player_info->card_count > 0)) {
+        } else if((game->table_card_count == 0) && (game->players[i] == game->attacking_player)){
             cards = what_cards_can_be_placed(game->players[i], game, "attack");
             offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%s > ", cards);
-        } else {
-            offset += snprintf(buffer + offset, sizeof(buffer) - offset, "> ");
-        }
+        } else if((game->table_card_count > 0) && (game->players[i] != game->defending_player)) {            
+            cards = what_cards_can_be_placed(game->players[i], game, "attack");
+            offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%s > ", cards);
+        } 
         if(cards != NULL) {
             free(cards);
             cards = NULL;
@@ -474,7 +469,6 @@ void place_card(struct server_str* serv, struct game_session *game, char c, stru
         int card_to_beat_rank = game->table_cards[game->table_card_count-1] % 13;
         int card_to_beat_suit = game->table_cards[game->table_card_count-1] / 13;
         int trump_card_suit = game->trump_card / 13;
-        //printf("card_to_beat_suit = %d, suit = %d, card_to_beat_rank = %d, rank = %d, trump_card_suit = %d\n", card_to_beat_suit, suit, card_to_beat_rank, rank, trump_card_suit);
         if(((card_to_beat_suit == suit) && (card_to_beat_rank < rank)) || ((card_to_beat_suit != suit) && (suit == trump_card_suit))) {
             game->table_cards[game->table_card_count] = game->defending_player->player_info->hand[played_card];
             game->table_card_count++;
@@ -487,22 +481,20 @@ void place_card(struct server_str* serv, struct game_session *game, char c, stru
             game->defending_player->player_info->card_count--;
         } else {
             session_send_string(sess->sd, "You can't beat with this card.\n");
-            //send_table(serv, game, sess);
         }
-    } else if(sess->sd == game->attacking_player->sd) {
-        int rank = game->attacking_player->player_info->hand[played_card] % 13;
+    } else {
+        int rank = sess->player_info->hand[played_card] % 13;
         int rank_table_cards = game->table_cards[0] % 13;
         while(i < (game->table_card_count+1)) {
             if((rank == rank_table_cards) || (game->table_card_count == 0)) {
-                game->table_cards[game->table_card_count] = game->attacking_player->player_info->hand[played_card];
-                game->table_card_count++;
-                game->table_cards[game->table_card_count] = -1;
-                size_t card_size = sizeof(game->attacking_player->player_info->hand[0]);
-                size_t count = game->attacking_player->player_info->card_count - played_card - 1;
-                memmove(game->attacking_player->player_info->hand + played_card,
-                        game->attacking_player->player_info->hand + played_card + 1,
+                game->card_queue[game->queue_len] = sess->player_info->hand[played_card];
+                game->queue_len++;
+                game->card_queue[game->queue_len] = -1;
+                size_t card_size = sizeof(sess->player_info->hand[0]);
+                size_t count = sess->player_info->card_count - played_card - 1;
+                memmove(sess->player_info->hand + played_card, sess->player_info->hand + played_card + 1,
                         count * card_size);
-                game->attacking_player->player_info->card_count--;
+                sess->player_info->card_count--;
                 break;
             }
             i++;
@@ -573,29 +565,21 @@ void update_defending_player(struct game_session* game) {
     while(game->players[defending_player_index] != game->defending_player) {
         defending_player_index++;
     }
-    printf("old defending_player: %d\n", defending_player_index);
     defending_player_index = (defending_player_index + 1) % game->player_count;
     game->defending_player = game->players[defending_player_index];
-    printf("new defending_player: %d\n", defending_player_index);    
 }
 
 void update_attacking_player(struct game_session *game)
 {
-    struct client_session *prev_player = NULL;
     int attacking_player_index = 0;
     while(game->players[attacking_player_index] != game->attacking_player) {
         attacking_player_index++;
     }
-    printf("old attacking player: %d\n", attacking_player_index);
     attacking_player_index = (attacking_player_index + 1) % game->player_count;
     if(game->players[attacking_player_index] == game->defending_player) {
         attacking_player_index = (attacking_player_index + 1) % game->player_count;
     }
     game->attacking_player = game->players[attacking_player_index];
-    /*if(game->attacking_player == prev_player) {
-        
-    }*/
-    printf("new attacking player: %d\n", attacking_player_index);
 }
 
 void clear_table(struct game_session *game)
@@ -640,35 +624,57 @@ void take_table_cards(struct game_session *game)
     game->table_card_count = 0;
 }
 
+static void place_all_queue(struct game_session *game)
+{
+    while(game->queue_len > 0) {
+        game->table_cards[game->table_card_count] = game->card_queue[game->queue_len-1];
+        game->table_card_count++;
+        game->table_cards[game->table_card_count] = -1;
+        game->card_queue[game->queue_len] = -1;
+        game->queue_len--;
+    }
+    return;
+}
 
 static void session_game(struct server_str* serv, struct game_session *game, struct client_session* sess, char *line)
 { 
     int next_id_player = -1;
-    //send_table(serv, game, sess);
-    if((((game->table_card_count % 2) != 0) && (sess == game->attacking_player)) 
-        /*|| (((game->table_card_count % 2) == 0) && (sess->sd == game->defending_player->sd))*/) {
+    int n = 0, i = 0;
+    if((game->table_card_count == 0) && (sess != game->attacking_player)) {
         send_table(serv, game, sess);
         return;
+    }
+    while(i < game->player_count+n) {
+        if(game->players[i] == game->defending_player) {
+            printf("id: %d\n", i);
+        }
+        if(game->players[i] != NULL && game->players[i]->player_info->card_count == 0) {
+            end_game(game, game->players[i]);
+            return;
+        }
+        if(game->players[i] == NULL) {
+            n++;
+        }
+        i++;
     }
     next_id_player = (game->attacking_player->player_info->id + 1) % game->player_count;
     send_table(serv, game, sess);
     char command = line[0];
-    if (((command >= 'a') && (command <= 'z')) || ((command >= 'A') && (command <= 'Z')) 
-        || ((command == '\0') && (sess == game->attacking_player) && (game->players[next_id_player] != game->defending_player))) {
+    if (((game->queue_len < game->defending_player->player_info->card_count - 1) || (sess == game->defending_player)) && (((command >= 'a') && (command <= 'z')) || ((command >= 'A') && (command <= 'Z')))) { 
         if(command != '\0') {
             place_card(serv, game, command, sess);
         }
-        if(sess != game->defending_player) {
-            update_attacking_player(game);
-        }
-    } else if((command == '\0') && ((game->table_card_count % 2) == 0) && (game->table_card_count > 0) && (sess == game->attacking_player) 
-              && (game->players[next_id_player] == game->defending_player) /* if next player is defending player*/
-             ) {
+    } else if((command == '\0') && ((game->table_card_count % 2) == 0) && (game->table_card_count > 0) 
+              && (sess == game->attacking_player) && (game->players[next_id_player] == game->defending_player)) {
         deal_cards(game);
         update_defending_player(game);
         update_attacking_player(game);
         clear_table(game);
-    } else if((command == '\0') && ((game->table_card_count % 2) != 0) && (game->table_card_count > 0) && (sess == game->defending_player)) {
+    } else if((command == '\0') && ((game->table_card_count % 2) != 0) 
+              && (game->table_card_count > 0) && (sess == game->defending_player)) {
+        if(game->queue_len > 0) {
+            place_all_queue(game);
+        }
         take_table_cards(game);
         deal_cards(game);
         update_defending_player(game);
@@ -677,12 +683,13 @@ static void session_game(struct server_str* serv, struct game_session *game, str
         update_attacking_player(game);
     } else {
         session_send_string(sess->sd, "Invalid command. Please play a valid card.\n");
-        /*send_table(serv, game, sess);
-        return;*/
     }
-    if (game->defending_player->player_info->card_count == 0) {
-        end_game(game, sess);
-        return;
+    if((game->queue_len > 0) && ((game->table_card_count % 2) == 0)) {
+        game->table_cards[game->table_card_count] = game->card_queue[0];
+        game->table_card_count++;
+        game->table_cards[game->table_card_count] = -1;
+        memmove(&game->card_queue[0], &game->card_queue[1], (game->queue_len-1) * sizeof(int));
+        game->queue_len--;
     }
     send_table(serv, game, sess);
     return;
@@ -807,7 +814,7 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
         break;
     case fsm_game:
         if(serv->games_array[sess->player_info->game_id]->is_started == true) {
-            session_game(serv, serv->games_array[0], sess, line);
+            session_game(serv, serv->games_array[sess->player_info->game_id], sess, line);
         } else {
             if((line[0] == 0) && (serv->games_array[sess->player_info->game_id]->player_count > 1)) {
                 serv->games_array[sess->player_info->game_id]->is_started = true;
