@@ -1,0 +1,575 @@
+#include "client.hpp" 
+#include "game_table.hpp"
+#include "windows.hpp"
+#include <thread>
+#include <sys/socket.h> // recv
+
+/*void chat_tick(void* data) {
+    Server* server = static_cast<Server*>(data);
+    server->ReceiveMessage(); 
+    Fl::repeat_timeout(1, chat_tick, server); 
+}*/
+
+// Parse card from string
+Card parse_card(const char* card_str) {
+    Card card;
+    int len = strlen(card_str);
+
+    // Last character is suit
+    card.suit = card_str[len - 1];
+
+    // Rest is rank
+    strncpy(card.rank, card_str, len - 1);
+    card.rank[len - 1] = '\0';
+
+    return card;
+}
+
+Game::Game(int game_id, const char* game_name, int players_cnt, bool started)
+    : id(game_id), name(nullptr), players_count(players_cnt), is_started(started),
+      trump_suit('\0'), table_count(0), current_attacker_index(-1), current_defender_index(-1)
+{
+    if (game_name) {
+        name = new char[strlen(game_name) + 1];
+        strcpy(name, game_name);
+    }
+}
+
+
+Game::~Game()
+{
+    if (name) {
+        delete[] name;
+    }
+}
+
+void Game::SetPlayersCount(int pc) 
+{
+    if((pc >= 0) && (pc < 8)) {
+        players_count = pc;
+    } 
+}
+
+
+/*Server::Server(const std::string& host_, int port_, AppState& state_)
+    : host(host_), port(port_), state(state_), sock(-1)
+{
+    connect_to_server();
+    if (running) {
+        recv_thread = std::thread(&Server::recv_loop, this);
+    }
+}*/
+
+Server::~Server()
+{
+    running = false;
+    if (sock >= 0) {
+        shutdown(sock, SHUT_RDWR);
+        close(sock);
+    }
+    if(game) {
+        delete game;
+    }
+
+    if (recv_thread.joinable()) {
+        recv_thread.join();
+    }
+}
+
+void Server::start(const std::string& host_, int port_)
+{
+    host = host_;
+    port = port_;
+    connect_to_server();
+    if (running) {
+        recv_thread = std::thread(&Server::recv_loop, this);
+    }
+}
+
+void Server::connect_to_server()
+{
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+       perror("socket");
+       return;
+    }
+
+    sockaddr_in serv_addr{};
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) <= 0) {
+        fl_message("Invalid address / Address not supported");
+        return;
+    }
+
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        fl_message("Connection Failed");
+        exit(0);
+    }
+    /*recv(sock, &prof.sd, sizeof(prof.sd), 0);
+    printf("%d\n\n\n\n\n\n", prof.sd);*/
+    running = true;
+}
+
+bool Server::is_running() const
+{
+    return running;
+}
+
+bool Server::send_string(const char *str) const
+{
+    size_t len;
+    if(str != nullptr) {
+        len = strlen(str);
+    } else {
+        len = 0;
+    }
+    char buffer[len + 1];
+
+    memcpy(buffer, str, len);
+    buffer[len] = '\n';
+    if (send(sock, buffer, len+1, 0) < 0) {
+        perror("Failed to send message");
+        return false;
+    }
+    return true;
+}
+
+void Server::SetGame(Game *g) 
+{ 
+    delete game;
+    game = nullptr;
+    game = g; 
+}
+
+char *Server::fetch_buffer()
+{
+    std::lock_guard<std::mutex> lock(buf_mutex);
+
+    std::size_t pos = recv_buffer.find('\n');
+    if (pos == std::string::npos) {
+        return nullptr;
+    }
+
+    char* line = new char[pos + 1];
+    std::memcpy(line, recv_buffer.data(), pos);
+    line[pos] = '\0';
+
+    recv_buffer.erase(0, pos + 1);
+
+    return line;
+}
+
+
+// Trigger window update from main thread using FLTK's awake mechanism
+void Server::TriggerWindowUpdate() {
+    Game *g = game;
+    // This is called from network thread, need to update UI from main thread
+    Fl::awake([](void* data) {
+        auto* params = static_cast<std::pair<AppState*, Game*>*>(data);
+
+        AppState* st = params->first;
+        Game* g     = params->second;
+
+        if (st->gameWin) {
+            if(st->gameWin->GetGame()->IsGameStarted()) {
+                st->gameWin->UpdateUI();
+            } else {
+                st->gameWin->clearUI();
+                st->gameWin->initUI();
+            }
+        }
+    }, new std::pair<AppState*, Game*>(&state, g));
+}
+
+GameCmd getCommand(const char* msg) {
+    if (strncmp(msg, "#game_start", 11) == 0) return GameCmd::GAME_START;
+    if (strncmp(msg, "#player ", 8) == 0) return GameCmd::PLAYER;
+    if (strncmp(msg, "#your_cards", 11) == 0) return GameCmd::YOUR_CARDS;
+    if (strncmp(msg, "#turn", 5) == 0) return GameCmd::TURN;
+    if (strncmp(msg, "#table", 6) == 0) return GameCmd::TABLE;
+    if (strncmp(msg, "#pair", 5) == 0) return GameCmd::PAIR;
+    if (strncmp(msg, "#player_update", 14) == 0) return GameCmd::PLAYER_UPDATE;
+    if (strncmp(msg, "#draw_cards", 11) == 0) return GameCmd::DRAW_CARDS;
+    if (strncmp(msg, "#round_end", 10) == 0) return GameCmd::ROUND_END;
+    if (strncmp(msg, "#game_end", 9) == 0) return GameCmd::GAME_END;
+    if (strncmp(msg, "#error", 6) == 0) return GameCmd::ERROR;
+
+    return GameCmd::UNKNOWN;
+}
+
+void Server::ProcessGameMessage(const char* msg)
+{
+    /*for(int n = 0; n < game->GetPlayersCount(); n++) {
+        printf("\n\n\n\n\n\n\n\n\n\nPlayer %d name: %s\n\n\n\n\n\n\n\n\n", n, game->GetPlayer(n).name.c_str());
+    }*/
+    switch (getCommand(msg))
+    {
+        case GameCmd::GAME_START: {
+            char trump_suit;
+            int player_count;
+            sscanf(msg, "#game_start %c %d", &trump_suit, &player_count);
+
+            if (game != nullptr)
+                perror("game does not exist at the start of the game");
+
+            game->SetTrumpSuit(trump_suit);
+            game->SetPlayersCount(player_count);
+            game->SetTableCount(0);
+            game->StartGame();
+            printf("Game started! Trump: %c, Players: %d\n", trump_suit, player_count);
+        } break;
+
+        case GameCmd::PLAYER: {
+            int index, cards_count;
+            char name[64];
+            sscanf(msg, "#player %d %63s %d", &index, name, &cards_count);
+
+            if ((game != nullptr) && (index < 8)) {
+                if((game->GetPlayer(index).id == -1) && (game->IsGameStarted() == false)) {
+                    game->SetPlayersCount(game->GetPlayersCount() + 1);
+                }
+                if(strcmp(prof.name, name) == 0) {
+                    prof.id = index;
+                }
+                game->GetPlayer(index).id = index;
+                game->GetPlayer(index).name = name;
+                //printf("Player NAME: %s; NAME: %s\n", game->GetPlayer(index).name.c_str(), name);
+                game->UpdatePlayerCardsCount(index, cards_count);
+            }
+            printf("\033[31mPlayer id - %d: %s (%d cards)\033[0m\n", index, name, cards_count);
+        } break;
+
+        case GameCmd::YOUR_CARDS: {
+            game->GetHand().clear();
+            const char* ptr = msg + 12;
+            char card_str[4];
+            int i;
+            for(i = 0; game->GetPlayer(i).id != GetProfile().id; i++) {}
+            auto &player = game->GetPlayer(i);
+            while (sscanf(ptr, "%3s", card_str) == 1) {
+                game->GetHand().push_back(parse_card(card_str));
+                ptr = strchr(ptr, ' ');
+                if (!ptr) break;
+                ptr++;
+            }
+            player.cards_count = game->GetHand().size();
+        } break;
+
+        case GameCmd::TURN: {
+            int attacker_idx, defender_idx;
+            sscanf(msg, "#turn %d %d", &attacker_idx, &defender_idx);
+            if (game != nullptr) {
+                game->UpdateAttacker(attacker_idx);
+                game->UpdateDefender(defender_idx);
+            }
+        } break;
+
+        case GameCmd::TABLE: {
+            int pair_count;
+            sscanf(msg, "#table %d", &pair_count);
+            if (game != nullptr) {
+                game->SetTableCount(pair_count);
+            }
+            //printf("Table has %d pairs\n", pair_count);
+        } break;
+
+        case GameCmd::PAIR: {
+            char attack_str[6] = {0};
+            char defense_str[6] = {0};
+            
+            Card attack_card;
+            Card defense_card;
+            
+            bool attack_dup = false;
+            bool defense_dup = false;
+            int matched = sscanf(msg, "#pair %5s %5s", attack_str, defense_str);
+            
+            attack_card = parse_card(attack_str);
+            if(matched == 2) {
+                defense_card = parse_card(defense_str);
+            }
+            
+            if (game != nullptr) {
+                for(size_t i = 0; i < game->GetTableAttack().size(); i++) {
+                    if((i < game->GetTableAttack().size()) && (attack_card.rank[0] == game->GetTableAttack()[i].rank[0]) 
+                        && (attack_card.suit == game->GetTableAttack()[i].suit)) {
+                        attack_dup = true;
+                    }
+                    
+                    if((i < game->GetTableDefense().size()) && (defense_card.rank[0] == game->GetTableDefense()[i].rank[0]) 
+                        && (defense_card.suit == game->GetTableDefense()[i].suit)) {
+                        defense_dup = true;
+                    }
+                }
+
+                
+                if((attack_dup == false) && (game->GetTableCount() - game->GetTableAttack().size()) > 0) {
+                    //int idx = game->GetTableCount();
+                    game->GetTableAttack().push_back(attack_card);
+                    game->SetTableCount(game->GetTableCount() + 1);
+                }
+                
+                if((matched == 2) && (defense_dup == false) && ((game->GetTableCount() - game->GetTableDefense().size()) > 0)) {
+                    game->GetTableDefense().push_back(defense_card);//(idx) = parse_card(defense_str);
+                }
+            }
+        } break;
+
+        case GameCmd::PLAYER_UPDATE: {
+            int index, cards_count;
+            sscanf(msg, "#player_update %d %d", &index, &cards_count);
+            if ((game != nullptr) && (index < 8)) {
+                game->UpdatePlayerCardsCount(index, cards_count); 
+            }
+            //printf("Player %d now has %d cards\n", index, cards_count);
+        } break;
+
+        case GameCmd::DRAW_CARDS: {
+            const char* ptr = msg + 12;
+            char card_str[6];
+            while (sscanf(ptr, "%5s", card_str) == 1) {
+                game->GetHand().push_back(parse_card(card_str));
+                ptr = strchr(ptr, ' ');
+                if (!ptr) break;
+                ptr++;
+            }
+            //printf("Drew cards, now have %zu\n", game->GetHand().size());
+        } break;
+
+        case GameCmd::ROUND_END: {
+            char result[16];
+            sscanf(msg, "#round_end %15s", result);
+            printf("Round ended: %s\n", result);
+            if (state.chatOutput) {
+                std::string cur(state.chatOutput->value());
+                cur += "Round ended: ";
+                cur += result;
+                cur += "\n";
+                state.chatOutput->value(cur.c_str());
+            }
+            game->GetTableAttack().clear();
+            game->GetTableDefense().clear();
+            game->SetTableCount(0);
+        } break;
+
+        case GameCmd::GAME_END: {
+            int loser_idx;
+            sscanf(msg, "#game_end %d", &loser_idx);
+            printf("Game ended! Loser: %d\n", loser_idx);
+            Fl::awake([](void* data) {
+                int* loser = static_cast<int*>(data);
+                fl_message("Game Over! Player %d lost.", *loser);
+                delete loser;
+            }, new int(loser_idx));
+        } break;
+
+        case GameCmd::ERROR: {
+            const char* error_msg = msg + 7;
+            printf("Server error: %s\n", error_msg);
+            auto* err = new std::string(error_msg);
+            Fl::awake([](void* data) {
+                auto* msg = static_cast<std::string*>(data);
+                fl_message("Error: %s", msg->c_str());
+                delete msg;
+            }, err);
+        } break;
+
+        case GameCmd::UNKNOWN:
+        default:
+            printf("Unknown command: %s\n", msg);
+            break;
+    }
+    
+    TriggerWindowUpdate();
+}
+
+
+void Server::ReceiveMessage(const std::string& msg)
+{
+    if (msg.empty()) return;
+
+    if (msg[0] == '#') {
+        ProcessGameMessage(msg.c_str());
+    } else {
+        if (state.chatOutput) {
+            printf("AWAKE\n");
+            Fl::lock();
+            std::string current(state.chatOutput->value());
+            current += msg + "\n";
+            state.chatOutput->value(current.c_str());
+            Fl::unlock();
+            Fl::awake();
+        }
+    }
+}
+
+void Server::recv_loop()
+{
+    char buf[BUFFER_SIZE];
+    while (running) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(sock, &readfds);
+        struct timeval tv{};
+        tv.tv_sec  = 1;
+        tv.tv_usec = 0;
+        int ret = select(sock + 1, &readfds, nullptr, nullptr, &tv);
+        if (ret < 0) {
+            perror("select");
+            running = false;
+            break;
+        }
+        else if (ret == 0) {
+            continue;
+        }
+        if (FD_ISSET(sock, &readfds)) {
+            int rc = recv(sock, buf, BUFFER_SIZE - 1, 0);
+            if (rc <= 0) {
+                running = false;
+                break;
+            }
+            buf[rc] = '\0';
+            printf("RECEIVED DATA: <%s>\n", buf);  // DEBUG
+            {
+                std::lock_guard<std::mutex> lock(buf_mutex);
+                recv_buffer.append(buf);
+                printf("BUFFER NOW: \"%s\n\"", recv_buffer.c_str());  // DEBUG
+            }
+        }
+        
+        if ((state.current_state == state.mainMenuWin) ||
+            (state.current_state == state.gameWin))
+        {
+            while (true) {
+                std::string msg;
+                {
+                    std::lock_guard<std::mutex> lock(buf_mutex);
+                    size_t pos = recv_buffer.find('\n');
+                    if (pos == std::string::npos) {
+                        printf("NO NEWLINE FOUND\n");  // DEBUG
+                        break;
+                    }
+                    msg = recv_buffer.substr(0, pos);
+                    recv_buffer.erase(0, pos + 1);
+                    printf("recv buffer: <%s>", recv_buffer.c_str());
+                }
+                printf("PROCESSING msg: %s\n", msg.c_str());
+                ReceiveMessage(msg);
+            }
+        } else {
+            printf("STATE CHECK FAILED\n");  // DEBUG
+        }
+    }
+}
+
+bool Server::authenticate(const char *user, const char *pass)
+{
+    if(user[0] == '\0' || pass[0] == '\0') {
+        return false;
+    }
+    if(!send_string(user)) {
+        return false;
+    }
+    char *msg = nullptr;
+    while(msg == nullptr) {
+        msg = fetch_buffer();
+    }
+    if(msg == nullptr) {
+        return false;
+    }
+    if((strcmp(msg, "User with this username already exist.") == 0) || 
+       ((strcmp(msg, "Login username, OK") != 0) && (strcmp(msg, "Sign up username, OK") != 0))) {
+        fl_message("%s", msg);
+        delete [] msg;
+        return false;
+    }
+    delete [] msg;
+    msg = nullptr;
+    if(!send_string(pass)) {
+        fl_message("Failed to send password");
+        return false;
+    }
+
+    while(msg == nullptr) {
+        msg = fetch_buffer();
+    }
+
+    if((strcmp(msg, "You have been successfully logged into the system.") == 0)
+    || (strcmp(msg, "You have been successfully Sign up to the system.") == 0)) {
+        fl_message("%s", msg);
+        delete [] msg;
+        prof.name = strdup(user);
+        return true;
+    }
+
+    if (msg != nullptr) {
+        fl_message("%s", msg);
+        delete [] msg;
+    }
+
+    return false;
+}
+
+/*int Server::GetSock()
+{
+    return prof.sd;
+}*/
+
+
+int Server::GetPlayerId()
+{
+    return prof.id;
+}
+
+void send_callback(Fl_Widget* w, void* data) {
+    Fl_Input *input = static_cast<Fl_Input*>(w);
+    Server *server = static_cast<Server*>(data);
+    server->send_string(((Fl_Input*)input)->value());
+    ((Fl_Input*)input)->take_focus();
+}
+
+void StartServerCallback(void* arg) {
+    auto pair = static_cast<std::pair<Server*, AppState*>*>(arg);
+    pair->first->start("127.0.0.1", 5555/*, *pair->second*/);
+    delete pair;
+}
+
+void update_ui_cb(void* w) {
+    static_cast<GameWindow*>(w)->UpdateUI();
+    Fl::repeat_timeout(0.5, update_ui_cb, w);
+}
+
+int main() 
+{
+    Fl::lock();
+
+    AppState state;
+    Game *game = nullptr;
+    Server server(state, game);
+
+    state.mainWin       = createMainWindow(state, server);
+    state.signupWin     = state.loginWin = createAuthWindow(server, state);
+    state.mainMenuWin   = createMainMenuWindow(state, server);
+    state.listGamesWin  = createListGameWindow(server, state, nullptr, 0);
+    state.createGameWin = createCreateGameWindow(server, state);
+    state.gameWin       = static_cast<GameWindow*>(createGameWindow(server, state/*, game*/));/*new GameWindow(server, state, nullptr);*/
+
+    /*if (state.chatOutput) {
+        start_receiver(server, state.chatOutput);
+    }*/
+
+    state.mainWin->show();
+
+
+    server.start("127.0.0.1", 5555/*, state*/);
+
+    //Fl::add_timeout(0.5, update_ui_cb, state.gameWin);
+    //Fl::add_timeout(1, StartServerCallback, new std::pair<Server*, AppState*>(&server, &state));
+
+    //Fl::add_timeout(1, chat_tick, &server);
+
+    return Fl::run();
+}
+
