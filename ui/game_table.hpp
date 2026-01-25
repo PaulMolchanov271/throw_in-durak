@@ -14,25 +14,6 @@
 #include <vector>
 #include <string>
 
-// Widget for displaying a card
-/*class CardWidget : public Fl_Box {
-    Fl_PNG_Image* img;
-    Card card_data;
-    bool selected;
-    Server* server;
-    
-public:
-    CardWidget(int x, int y, const Card& card, int w, int h, Server* srv);
-    
-    ~CardWidget();
-    
-    int handle(int event) override;
-    
-    bool isSelected() const { return selected; }
-    Card getCard() const { return card_data; }
-};*/
-
-
 // Enhanced CardWidget with smart attack/defense detection
 class CardWidget : public Fl_Box {
     Fl_PNG_Image* img;
@@ -82,7 +63,7 @@ class GameWindow : public Fl_Window {
     CardWidget* highlighted_target;
     
 public:
-    GameWindow(Server& srv, AppState& st/*, Game *g*/);
+    GameWindow(Server& srv, AppState& st);
 
     ~GameWindow() { delete game; }
 
@@ -118,6 +99,6 @@ public:
 };
 
 // Function to create game window
-Fl_Window* createGameWindow(Server& server, AppState& state/*, const char *name, Game *game*/);
+Fl_Window* createGameWindow(Server& server, AppState& state);
 
 #endif

@@ -20,7 +20,6 @@ Fl_Window *createListGameWindow(Server& server, AppState& state, Game **listGame
 struct AppState;
 class Server;
 class Game;
-//Fl_Window *createGameWindow(Server& server, AppState& state/*, const char *name, Game *game*/);
 
 // Game table widget
 class GameTable : public Fl_Table {

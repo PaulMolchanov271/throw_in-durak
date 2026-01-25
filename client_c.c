@@ -5,7 +5,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 
-#define SERVER_IP 0.0.0.0
+#define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 5555
 #define BUFFER_SIZE 1024
 
@@ -69,7 +69,10 @@ int main() {
 
     // Main loop: sending messages to the server
     while (1) {
-        fgets(buffer, BUFFER_SIZE, stdin);
+        if(fgets(buffer, BUFFER_SIZE, stdin) == NULL) {
+            close(sock);
+            return 0;
+        }
 
         // Send the message to the server
         if (send(sock, buffer, strlen(buffer), 0) < 0) {

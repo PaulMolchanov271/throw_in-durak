@@ -133,7 +133,6 @@ void OKButton::OnPress()
         while(recv_info == nullptr) {
             recv_info = server.fetch_buffer();
         }
-        //sscanf(recv_info, "#player %d Pavel %d", &id, &cards_count);
         int game_id = 0, i = 0;
         while(recv_info[i] != '\0') {
             game_id = game_id * 10 + (recv_info[i] - 48);
@@ -162,10 +161,8 @@ void OKButton::OnPress()
 
         state.gameWin->label(name);
         state.current_state->hide();
-        //state.gameWin->show();
         state.current_state = state.gameWin;
         state.gameWin->initUI();
-        //state.gameWin->UpdateUI();
         state.gameWin->show();
         return;
     }
@@ -294,10 +291,6 @@ void parse_games(const char* msg, Game **games, int& games_count) {
             }
 
             games[games_count] = new Game(id, name, player_count, (is_started != 0));
-            /*games[games_count]->id = id;
-            games[games_count]->name = strdup(name); 
-            games[games_count]->player_count = player_count;
-            games[games_count]->is_started = (is_started != 0);*/
 
             games_count++;
         }

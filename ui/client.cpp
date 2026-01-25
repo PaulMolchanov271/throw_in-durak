@@ -4,11 +4,6 @@
 #include <thread>
 #include <sys/socket.h> // recv
 
-/*void chat_tick(void* data) {
-    Server* server = static_cast<Server*>(data);
-    server->ReceiveMessage(); 
-    Fl::repeat_timeout(1, chat_tick, server); 
-}*/
 
 // Parse card from string
 Card parse_card(const char* card_str) {
@@ -50,15 +45,6 @@ void Game::SetPlayersCount(int pc)
     } 
 }
 
-
-/*Server::Server(const std::string& host_, int port_, AppState& state_)
-    : host(host_), port(port_), state(state_), sock(-1)
-{
-    connect_to_server();
-    if (running) {
-        recv_thread = std::thread(&Server::recv_loop, this);
-    }
-}*/
 
 Server::~Server()
 {
@@ -107,8 +93,6 @@ void Server::connect_to_server()
         fl_message("Connection Failed");
         exit(0);
     }
-    /*recv(sock, &prof.sd, sizeof(prof.sd), 0);
-    printf("%d\n\n\n\n\n\n", prof.sd);*/
     running = true;
 }
 
@@ -201,9 +185,6 @@ GameCmd getCommand(const char* msg) {
 
 void Server::ProcessGameMessage(const char* msg)
 {
-    /*for(int n = 0; n < game->GetPlayersCount(); n++) {
-        printf("\n\n\n\n\n\n\n\n\n\nPlayer %d name: %s\n\n\n\n\n\n\n\n\n", n, game->GetPlayer(n).name.c_str());
-    }*/
     switch (getCommand(msg))
     {
         case GameCmd::GAME_START: {
@@ -235,7 +216,6 @@ void Server::ProcessGameMessage(const char* msg)
                 }
                 game->GetPlayer(index).id = index;
                 game->GetPlayer(index).name = name;
-                //printf("Player NAME: %s; NAME: %s\n", game->GetPlayer(index).name.c_str(), name);
                 game->UpdatePlayerCardsCount(index, cards_count);
             }
             printf("\033[31mPlayer id - %d: %s (%d cards)\033[0m\n", index, name, cards_count);
@@ -272,7 +252,6 @@ void Server::ProcessGameMessage(const char* msg)
             if (game != nullptr) {
                 game->SetTableCount(pair_count);
             }
-            //printf("Table has %d pairs\n", pair_count);
         } break;
 
         case GameCmd::PAIR: {
@@ -306,13 +285,12 @@ void Server::ProcessGameMessage(const char* msg)
 
                 
                 if((attack_dup == false) && (game->GetTableCount() - game->GetTableAttack().size()) > 0) {
-                    //int idx = game->GetTableCount();
                     game->GetTableAttack().push_back(attack_card);
                     game->SetTableCount(game->GetTableCount() + 1);
                 }
                 
                 if((matched == 2) && (defense_dup == false) && ((game->GetTableCount() - game->GetTableDefense().size()) > 0)) {
-                    game->GetTableDefense().push_back(defense_card);//(idx) = parse_card(defense_str);
+                    game->GetTableDefense().push_back(defense_card);
                 }
             }
         } break;
@@ -323,7 +301,6 @@ void Server::ProcessGameMessage(const char* msg)
             if ((game != nullptr) && (index < 8)) {
                 game->UpdatePlayerCardsCount(index, cards_count); 
             }
-            //printf("Player %d now has %d cards\n", index, cards_count);
         } break;
 
         case GameCmd::DRAW_CARDS: {
@@ -335,7 +312,6 @@ void Server::ProcessGameMessage(const char* msg)
                 if (!ptr) break;
                 ptr++;
             }
-            //printf("Drew cards, now have %zu\n", game->GetHand().size());
         } break;
 
         case GameCmd::ROUND_END: {
@@ -431,11 +407,9 @@ void Server::recv_loop()
                 break;
             }
             buf[rc] = '\0';
-            printf("RECEIVED DATA: <%s>\n", buf);  // DEBUG
             {
                 std::lock_guard<std::mutex> lock(buf_mutex);
                 recv_buffer.append(buf);
-                printf("BUFFER NOW: \"%s\n\"", recv_buffer.c_str());  // DEBUG
             }
         }
         
@@ -448,14 +422,11 @@ void Server::recv_loop()
                     std::lock_guard<std::mutex> lock(buf_mutex);
                     size_t pos = recv_buffer.find('\n');
                     if (pos == std::string::npos) {
-                        printf("NO NEWLINE FOUND\n");  // DEBUG
                         break;
                     }
                     msg = recv_buffer.substr(0, pos);
                     recv_buffer.erase(0, pos + 1);
-                    printf("recv buffer: <%s>", recv_buffer.c_str());
                 }
-                printf("PROCESSING msg: %s\n", msg.c_str());
                 ReceiveMessage(msg);
             }
         } else {
@@ -512,10 +483,6 @@ bool Server::authenticate(const char *user, const char *pass)
     return false;
 }
 
-/*int Server::GetSock()
-{
-    return prof.sd;
-}*/
 
 
 int Server::GetPlayerId()
@@ -532,7 +499,7 @@ void send_callback(Fl_Widget* w, void* data) {
 
 void StartServerCallback(void* arg) {
     auto pair = static_cast<std::pair<Server*, AppState*>*>(arg);
-    pair->first->start("127.0.0.1", 5555/*, *pair->second*/);
+    pair->first->start("127.0.0.1", 5555);
     delete pair;
 }
 
@@ -554,21 +521,12 @@ int main()
     state.mainMenuWin   = createMainMenuWindow(state, server);
     state.listGamesWin  = createListGameWindow(server, state, nullptr, 0);
     state.createGameWin = createCreateGameWindow(server, state);
-    state.gameWin       = static_cast<GameWindow*>(createGameWindow(server, state/*, game*/));/*new GameWindow(server, state, nullptr);*/
-
-    /*if (state.chatOutput) {
-        start_receiver(server, state.chatOutput);
-    }*/
+    state.gameWin       = static_cast<GameWindow*>(createGameWindow(server, state));
 
     state.mainWin->show();
 
 
-    server.start("127.0.0.1", 5555/*, state*/);
-
-    //Fl::add_timeout(0.5, update_ui_cb, state.gameWin);
-    //Fl::add_timeout(1, StartServerCallback, new std::pair<Server*, AppState*>(&server, &state));
-
-    //Fl::add_timeout(1, chat_tick, &server);
+    server.start("127.0.0.1", 5555);
 
     return Fl::run();
 }

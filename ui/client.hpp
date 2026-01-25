@@ -34,7 +34,7 @@ enum {
 #define BUFFER_SIZE 1024
 
 struct Profile {
-    int /*sd, */id = -1;
+    int id = -1;
     char *name;
     int wins, loses;
 };
@@ -80,7 +80,6 @@ private:
     char *name = nullptr;
     int players_count;
     Player players[8];
-    //Card *hand;
     std::vector<Card> hand;
     bool is_started;
     char trump_suit;
@@ -108,8 +107,8 @@ public:
     int GetCurrentDefender() const { return current_defender_index; }
     int GetTableCount() const { return table_count; }
     std::vector<Card> &GetHand() { return hand; }
-    std::vector<Card> &GetTableAttack(/*int index*/) { return table_attack/*[index]*/; }
-    std::vector<Card> &GetTableDefense(/*int index*/) { return table_defense/*[index]*/; }
+    std::vector<Card> &GetTableAttack() { return table_attack; }
+    std::vector<Card> &GetTableDefense() { return table_defense; }
 
     void UpdateAttacker(int attacker_index) { current_attacker_index = attacker_index; }
     void UpdateDefender(int defender_index) { current_defender_index = defender_index; }
@@ -137,7 +136,7 @@ enum class GameCmd {
 
 
 // Game state structure
-struct GameState {                      /*TODO: should be deleted*/
+struct GameState {                      
     Game *current_game;                 
     std::vector<Card> player_cards;
     bool is_my_turn_attack;
@@ -176,16 +175,14 @@ public:
 
     ~Server(); 
 
-    void start(const std::string& host_, int port_/*, AppState& state_*/); 
+    void start(const std::string& host_, int port_); 
 
     void connect_to_server();
     bool is_running() const;
     bool send_string(const char *str) const;
     char *fetch_buffer();
-    //void ReceiveMessage();
     bool authenticate(const char *user, const char *pass);
     void ProcessGameMessage(const char* msg);
-    /*int GetSock();*/
     int GetPlayerId();
     void SetGame(Game *g);
     Game *GetGameState() { return game; }

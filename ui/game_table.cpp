@@ -155,23 +155,6 @@ void GameWindow::initUI()
     int boxHeight = 30;
     int n = 0;
     
-    /*for (int i = 0; i < game->GetPlayersCount(); ++i) {
-        if(server.GetProfile().id == game->GetPlayer(i).id) {
-            continue;
-        }
-        n++;
-        std::string player_info = std::string(game->GetPlayer(i).name) +
-                                 " (" + std::to_string(game->GetPlayerCardsCount(i)) + ")";
-        
-        // Store the label string for later cleanup
-        char* label = strdup(player_info.c_str());
-        player_labels.push_back(label); // Add std::vector<char*> player_labels to class
-        
-        Fl_Box* player_box = new Fl_Box(startX, startY + n * (boxHeight + 5),
-                                       150, boxHeight, label);
-        player_box->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
-        player_boxes.push_back(player_box);
-    }*/
     if (game) {
         for (int i = 0; i < game->GetPlayersCount(); ++i) {
             std::string player_info = std::string(game->GetPlayer(i).name) + 
@@ -191,18 +174,6 @@ void GameWindow::initUI()
         trump_box->color(FL_RED);
     }
 
-    /*
-    // Trump suit
-    std::string trump_text = "Trump: ";
-    trump_text += game->GetTrumpSuit();
-    trump_label_str = strdup(trump_text.c_str()); // Add char* trump_label_str to class
-    
-    trump_box = new Fl_Box(startX, startY + (game->GetPlayersCount()-1) * (boxHeight + 5) + 20,
-                          150, boxHeight, trump_label_str);
-    trump_box->box(FL_BORDER_BOX);
-    trump_box->labelfont(FL_BOLD);
-    trump_box->color(FL_RED)*/;
-    
     // Game status
     status_label = new Fl_Box(200, 20, 500, 40, "Waiting for game to start...");
     status_label->labelfont(FL_BOLD);
@@ -266,7 +237,7 @@ void GameWindow::clearUI()
     // Delete player boxes
     for (auto* box : player_boxes) {
         if(box) {
-            this->remove(box); // IMPORTANT: remove from parent first
+            this->remove(box); 
             delete box;
         }
     }
@@ -274,7 +245,7 @@ void GameWindow::clearUI()
     
     // Delete trump box
     if (trump_box) {
-        this->remove(trump_box); // IMPORTANT: remove from parent first
+        this->remove(trump_box);
         delete trump_box;
         trump_box = nullptr;
     }
@@ -500,7 +471,6 @@ void GameWindow::updateStatus() {
     this->redraw();
 }
 
-/*******************************************************************************************************************************************/
 
 void GameWindow::UpdateDropZoneLabel() {
     if (!game) {
@@ -602,7 +572,7 @@ bool GameWindow::TryPlayCard(const Card& card, int drop_x, int drop_y) {
     
     std::vector<Card> &attack_table = game->GetTableAttack();
     
-    if ((game->GetCurrentDefender() == server.GetProfile().id)/* && (attack_table[0])*/) {
+    if ((game->GetCurrentDefender() == server.GetProfile().id)) {
         // Defending against specific card
         Card target = target_card->getCard();
         
@@ -617,8 +587,8 @@ bool GameWindow::TryPlayCard(const Card& card, int drop_x, int drop_y) {
             }
         }
         
-        if ((static_cast<size_t>(target_index) >= 0) && (static_cast<size_t>(target_index) <= game->GetTableDefense().size()) 
-            /*&& (game->GetTableDefense()[target_index].rank[0] == '\0')*/) {
+        if ((static_cast<size_t>(target_index) >= 0) && 
+            (static_cast<size_t>(target_index) <= game->GetTableDefense().size())) {
             // This attack card is not defended yet
             msg = "#defend ";
             msg += card.rank;
@@ -641,9 +611,6 @@ bool GameWindow::TryPlayCard(const Card& card, int drop_x, int drop_y) {
         msg += card.suit;
         msg += '\n';
         
-        //msg += ' ';
-        //msg += server.GetProfile().id;
-
         printf("Attacking with %s%c\n", card.rank, card.suit);
     }
     
@@ -682,7 +649,6 @@ CardWidget* GameWindow::FindTableCardAt(int x, int y)
     return nullptr;
 }
 
-/*******************************************************************************************************************************************/
 
 void GameWindow::start_callback(Fl_Widget* w, void* data) 
 {
@@ -795,8 +761,8 @@ void GameWindow::performPass()
 }
 
 // Function to create game window
-Fl_Window* createGameWindow(Server& server, AppState& state/*, Game *game*/) 
+Fl_Window* createGameWindow(Server& server, AppState& state) 
 {
-    return new GameWindow(server, state/*, game*/);
+    return new GameWindow(server, state);
 }
 
