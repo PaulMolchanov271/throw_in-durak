@@ -153,6 +153,7 @@ void Server::PumpMessages() {
 }
 
 GameCmd getCommand(const char* msg) {
+    if (strncmp(msg, "#deck ", 6) == 0) return GameCmd::DECK;
     if (strncmp(msg, "#game_start", 11) == 0) return GameCmd::GAME_START;
     if (strncmp(msg, "#player ", 8) == 0) return GameCmd::PLAYER;
     if (strncmp(msg, "#your_cards", 11) == 0) return GameCmd::YOUR_CARDS;
@@ -185,6 +186,12 @@ void Server::ProcessGameMessage(const char* msg)
             game->SetTableCount(0);
             game->StartGame();
             printf("Game started! Trump: %c, Players: %d\n", trump_suit, player_count);
+        } break;
+
+        case GameCmd::DECK: {
+            char card[4]; int count;
+            if (sscanf(msg, "#deck %3s %d", card, &count) == 2 && count >= 0 && count <= 52)
+                game->SetDeck(parse_card(card), count);
         } break;
 
         case GameCmd::PLAYER: {

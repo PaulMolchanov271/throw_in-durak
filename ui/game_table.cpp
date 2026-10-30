@@ -189,14 +189,18 @@ void GameWindow::initUI()
             player_boxes.push_back(player_box);
         }
         
-        std::string trump_text = "Trump: ";
-        trump_text += game->GetTrumpSuit();
-        trump_box = new Fl_Box(startX, startY + game->GetPlayersCount() * (boxHeight + 5) + 20,
-                              150, boxHeight);
-        trump_box->copy_label(trump_text.c_str());
-        trump_box->box(FL_BORDER_BOX);
+        int trumpY = startY + game->GetPlayersCount() * (boxHeight + 5) + 20;
+        trump_box = new Fl_Box(startX, trumpY, 150, boxHeight, "Trump");
         trump_box->labelfont(FL_BOLD);
-        trump_box->color(FL_RED);
+        if (game->GetTrumpCard().rank[0]) {
+            // A display-only card: no server or drag/drop target attached.
+            new CardWidget(startX + 25, trumpY + 35, game->GetTrumpCard(), 100, 145, nullptr);
+            auto* deck_label = new Fl_Box(startX, trumpY + 185, 175, boxHeight);
+            std::string text = "Deck: " + std::to_string(game->GetDeckCount()) + " cards";
+            deck_label->copy_label(text.c_str());
+        } else {
+            trump_box->copy_label("Trump: waiting for deal");
+        }
     }
 
     // Game status

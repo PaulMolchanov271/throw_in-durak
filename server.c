@@ -75,6 +75,7 @@ struct client_session {
 struct game_session {
     int id;
     char *name;
+    char password[65];
     int player_count;
     struct client_session **players;
     struct client_session *defending_player, *attacking_player;
@@ -207,11 +208,12 @@ static void execute_list(struct server_str* serv, struct client_session *sess)
             char* centered_name = center_text(serv->games_array[i]->name, 17);
             
             snprintf(message, sizeof(message),
-                    " %d %s %d %d\n",
+                    " %d %s %d %d %d\n",
                     serv->games_array[i]->id, 
                     centered_name, 
                     serv->games_array[i]->player_count, 
-                    serv->games_array[i]->is_started);
+                    serv->games_array[i]->is_started,
+                    serv->games_array[i]->password[0] != '\0');
 
             free(centered_name);
             session_send_string(sess->sd, message);
@@ -227,6 +229,7 @@ void game_init(struct game_session *game, int id)
     for(i = 0; i < MAX_PLAYERS; i++) {
         game->players[i] = NULL;
     }
+    game->password[0] = '\0';
     game->player_count = 0;
     game->is_started = false;
 
@@ -327,7 +330,14 @@ static int command_check(struct server_str* serv, struct client_session *sess, c
             send_error(sess->sd, "Provide a game name"); return 0;
         }
         ptr = command + 8;
-        if (strlen(ptr) > 49 || strpbrk(ptr, " \t\r")) {
+        char *password = strchr(ptr, ' ');
+        if (password) {
+            *password++ = '\0';
+            if (!*password || strlen(password) > 64 || strpbrk(password, "\r\n\t")) {
+                send_error(sess->sd, "Lobby password: use 1-64 characters"); return 0;
+            }
+        }
+        if (!*ptr || strlen(ptr) > 49 || strpbrk(ptr, " \t\r")) {
             send_error(sess->sd, "Game name: use 1-49 characters without spaces"); return 0;
         }
         i = 0;
@@ -340,25 +350,38 @@ static int command_check(struct server_str* serv, struct client_session *sess, c
                 newlen += INIT_GAMES_ARR_SIZE;
             serv->games_array =
                 realloc(serv->games_array, newlen * sizeof(*serv->games_array));
-            for (i = serv->games_array_size; i < newlen; i++)
-                serv->games_array[i] = NULL;
+            for (int j = serv->games_array_size; j < newlen; j++)
+                serv->games_array[j] = NULL;
             serv->games_array_size = newlen;
         }
         serv->games_array[i] = execute_create_game(serv, sess, ptr, i);
+        if (password) snprintf(serv->games_array[i]->password, sizeof(serv->games_array[i]->password), "%s", password);
         sess->player_info->game_id = serv->games_array[i]->id;
         sess->state = fsm_game;
         return 0;
     }
     if(strncmp(command, "#join", 5) == 0) {
-        int game_id = -1; char extra;
-        if (sscanf(command, "#join %d %c", &game_id, &extra) != 1) {
+        char *password = NULL;
+        if (command[5] != ' ' || !isdigit((unsigned char)command[6])) {
             send_error(sess->sd, "Invalid game ID"); return 0;
         }
+        errno = 0;
+        long parsed_id = strtol(command + 6, &password, 10);
+        if (errno || parsed_id < 0 || parsed_id >= serv->games_array_size || (*password && *password != ' ')) {
+            send_error(sess->sd, "Invalid game ID"); return 0;
+        }
+        int game_id = (int)parsed_id;
+        if (*password == ' ') ++password;
         if (game_id < 0 || game_id >= serv->games_array_size || !serv->games_array[game_id]) {
             send_error(sess->sd, "Game does not exist"); return 0;
         }
         if(serv->games_array[game_id]->is_started == true) {
             session_send_string(sess->sd, "The game has already started, you can't connect to it.\n");
+            return 0;
+        }
+        struct game_session *game = serv->games_array[game_id];
+        if (game->password[0] && strcmp(game->password, password)) {
+            session_send_string(sess->sd, *password ? "#password_incorrect\n" : "#password_required\n");
             return 0;
         }
         int res = execute_join_game(serv, sess, game_id);
@@ -477,6 +500,10 @@ static void leave_game(struct server_str *serv, struct client_session *sess) {
     int id = sess->player_info->game_id;
     if (id < 0 || id >= serv->games_array_size || !serv->games_array[id]) return;
     struct game_session *g = serv->games_array[id];
+    char notice[160];
+    snprintf(notice, sizeof(notice), "#chat [System] %s left the lobby.\n", sess->username);
+    for (int i = 0; i < g->player_count; ++i)
+        if (g->players[i] != sess) session_send_string(g->players[i]->sd, notice);
     if (g->is_started) {
         // Leaving forfeits the match. All remaining players win.
         g->is_started = false;
@@ -692,7 +719,9 @@ void send_table_gui(struct game_session *game) {
     
 
         
-        offset = 0;
+        char trump[6];
+        format_card(game->trump_card, trump);
+        offset = snprintf(buffer, sizeof(buffer), "#deck %s %d\n", trump, game->deck_size);
 
         send_player_update(game, i);
         

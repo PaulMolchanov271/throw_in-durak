@@ -5,6 +5,7 @@
 #include <FL/Fl_Window.H>
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Input.H>
+#include <FL/Fl_Check_Button.H>
 #include <FL/fl_ask.H>
 #include <FL/Fl_Box.H>
 #include <FL/Fl_Multiline_Output.H>
@@ -50,6 +51,7 @@ struct AppState {
     Fl_Window *mainMenuWin = NULL;
     Fl_Window *listGamesWin = NULL;
     Fl_Window *createGameWin = NULL;
+    Fl_Check_Button *lobbyPasswordToggle = nullptr;
     GameWindow *gameWin = NULL;
     Fl_Multiline_Output *chatOutput = NULL;
     Fl_Window *profileWin = nullptr;
@@ -86,6 +88,9 @@ private:
     bool is_started;
     std::string result;
     char trump_suit;
+    Card trump_card;
+    int deck_count = -1;
+    bool password_protected = false;
     std::vector<Card> table_attack;
     std::vector<Card> table_defense;
     int table_count;
@@ -104,6 +109,11 @@ public:
     int GetPlayerCardsCount(int player_index) const { return players[player_index].cards_count; }
     Player &GetPlayer(int index) { return players[index]; }
     char GetTrumpSuit() const { return trump_suit; }
+    const Card& GetTrumpCard() const { return trump_card; }
+    int GetDeckCount() const { return deck_count; }
+    void SetDeck(const Card& card, int count) { trump_card = card; deck_count = count; }
+    bool IsPasswordProtected() const { return password_protected; }
+    void SetPasswordProtected(bool value) { password_protected = value; }
     int GetPlayersCount() const { return players_count; }
     bool IsGameStarted() const { return is_started; }
     int GetCurrentAttacker() const { return current_attacker_index; }
@@ -119,7 +129,7 @@ public:
     void SetPlayersCount(int pc); 
     void SetTrumpSuit(char tr) { trump_suit = tr; }
     void SetTableCount(int tc) { table_count = tc; } 
-    void StartGame() { is_started = true; result.clear(); hand.clear(); table_attack.clear(); table_defense.clear(); }
+    void StartGame() { is_started = true; trump_card = Card{}; deck_count = -1; result.clear(); hand.clear(); table_attack.clear(); table_defense.clear(); }
     void FinishGame(const std::string& text) { is_started = false; result = text; }
     const std::string& Result() const { return result; }
     void ResetPlayers() { for (auto& p : players) p = Player{}; players_count = 0; }
@@ -127,6 +137,7 @@ public:
 
 enum class GameCmd {
     GAME_START,
+    DECK,
     PLAYER,
     YOUR_CARDS,
     TURN,

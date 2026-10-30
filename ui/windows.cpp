@@ -127,7 +127,16 @@ void OKButton::OnPress()
             fl_message("Please enter game name.");
             return;
         }
+        if (strpbrk(name, " \t\r\n") || strlen(name) > 49) {
+            fl_message("Game name: use 1-49 characters without spaces."); return;
+        }
         std::string msg = std::string("#create ") + name;
+        if (state.lobbyPasswordToggle && state.lobbyPasswordToggle->value()) {
+            if (!*pass || strlen(pass) > 64 || strpbrk(pass, "\r\n\t")) {
+                fl_message("Enter a lobby password (1-64 characters)."); return;
+            }
+            msg += " "; msg += pass;
+        }
         server.send_string(msg.c_str());
         char *recv_info = nullptr;
         recv_info = server.wait_response();
@@ -223,14 +232,30 @@ JoinButton::JoinButton(
 }
 
 void JoinButton::OnPress() {
-    std::string msg = "#join " + std::to_string(game->GetGameId());
-    server.send_string(msg.c_str());
-    char *reply = server.wait_response();
-    if (!reply) return;
-    if (strcmp(reply, "#joined") != 0) {
-        fl_message("%s", reply); delete[] reply; return;
+    const std::string command = "#join " + std::to_string(game->GetGameId());
+    std::string password;
+    bool ask_password = game->IsPasswordProtected();
+    bool incorrect = false;
+    while (true) {
+        if (ask_password) {
+            const char* input = fl_password(incorrect ? "Incorrect password. Try again:" : "Lobby password:", "");
+            if (!input) return;
+            password = input;
+            if (password.empty() || password.size() > 64 || password.find_first_of("\r\n\t") != std::string::npos) {
+                fl_message("Enter a password (1-64 characters)."); continue;
+            }
+        }
+        std::string msg = command + (password.empty() ? "" : " " + password);
+        if (!server.send_string(msg.c_str())) return;
+        char *reply = server.wait_response();
+        if (!reply) return;
+        std::string response(reply); delete[] reply;
+        if (response == "#joined") break;
+        if (response == "#password_required" || response == "#password_incorrect") {
+            ask_password = true; incorrect = response == "#password_incorrect"; continue;
+        }
+        fl_message("%s", response.c_str()); return;
     }
-    delete[] reply;
     if (state.current_state) state.current_state->hide();
     delete state.gameWin; state.gameWin = nullptr;
     // The game list owns its entries; the active match has its own model.
@@ -246,10 +271,13 @@ void JoinButton::OnPress() {
 //////////////////////////////////////////////
 
 void parse_games(const char* msg, std::vector<Game*>& games) {
-    int id, count, started;
+    int id, count, started, locked = 0;
     char name[64];
-    if (sscanf(msg, "%d %63s %d %d", &id, name, &count, &started) == 4)
-        games.push_back(new Game(id, name, count, started != 0));
+    if (sscanf(msg, "%d %63s %d %d %d", &id, name, &count, &started, &locked) >= 4) {
+        auto* game = new Game(id, name, count, started != 0);
+        game->SetPasswordProtected(locked != 0);
+        games.push_back(game);
+    }
 }
 
 ListGamesButton::ListGamesButton(int x, int y, const char *lb, AppState& st, Server& serv)
@@ -379,8 +407,12 @@ Fl_Window* createMainMenuWindow(AppState& state, Server& server)
     }, chatInput);
 
     win->end();
-    state.profileWin = new Fl_Window(340, 200, "Profile");
+    state.profileWin = new Fl_Window(340, 240, "Profile");
     state.profileOutput = new Fl_Multiline_Output(20, 35, 300, 140, "Player statistics");
+    auto* closeProfile = new Fl_Button(110, 190, 120, 30, "Close");
+    closeProfile->callback([](Fl_Widget*, void* data) {
+        static_cast<Fl_Window*>(data)->hide();
+    }, state.profileWin);
     state.profileWin->end();
     return win;
 }
@@ -442,7 +474,7 @@ Fl_Window* createListGameWindow(Server& server, AppState& state, Game** listGame
         player_box->copy_label(players_count_str);
 
         // Status
-        const char* status = g->IsGameStarted() ? "Started" : "Waiting";
+        const char* status = g->IsGameStarted() ? "Started" : (g->IsPasswordProtected() ? "Password" : "Waiting");
         new Fl_Box(20 + col_width * 2, y, col_width, row_height, status);
 
         // Join button
@@ -472,10 +504,19 @@ Fl_Window *createCreateGameWindow(Server& server, AppState& state)
     username_label->labelfont(FL_BOLD);
     username_label->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 
-    Fl_Box *password_label = new Fl_Box(x, 70, 150, 25, "Password (optional):");
-    Fl_Input *password_input = new Fl_Input(x, 90, 150, 25);
-    password_label->labelfont(FL_BOLD);
-    password_label->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+    state.lobbyPasswordToggle = new Fl_Check_Button(x, 70, 220, 25, "Require password");
+    Fl_Input *password_input = new Fl_Input(x, 105, 220, 25);
+    password_input->type(FL_SECRET_INPUT);
+    password_input->maximum_size(64);
+    password_input->deactivate();
+    state.lobbyPasswordToggle->callback([](Fl_Widget* widget, void* data) {
+        auto* input = static_cast<Fl_Input*>(data);
+        if (static_cast<Fl_Check_Button*>(widget)->value()) {
+            input->activate(); input->take_focus();
+        } else {
+            input->value(""); input->deactivate();
+        }
+    }, password_input);
 
     new OKButton(150, "OK", server, username_input, password_input, state);
     new BackButton(150 + button_h + spacing, "Back", win, state.mainMenuWin, server, state);
