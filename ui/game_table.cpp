@@ -15,7 +15,7 @@ CardWidget::CardWidget(int x, int y, const Card& card, int w, int h, Server* srv
 
     Fl_PNG_Image* original = new Fl_PNG_Image(filename.c_str());
     if (original->w() > 0 && original->h() > 0) {
-        img = (Fl_PNG_Image*)original->copy(w, h);
+        img = original->copy(w, h);
         delete original;
         this->image(img);
     } else {
@@ -30,6 +30,12 @@ CardWidget::CardWidget(int x, int y, const Card& card, int w, int h, Server* srv
 
 int CardWidget::handle(int event)  
 {
+    bool in_hand = false;
+    if (server && server->GetGameState() && server->GetGameState()->IsGameStarted()) {
+        for (const auto& c : server->GetGameState()->GetHand())
+            if (c.suit == card_data.suit && !strcmp(c.rank, card_data.rank)) in_hand = true;
+    }
+    if (!in_hand) return Fl_Box::handle(event);
     switch(event) {
         case FL_PUSH:
             if (Fl::event_button() == FL_LEFT_MOUSE) {
@@ -54,7 +60,7 @@ int CardWidget::handle(int event)
 
                 // Highlight drop target
                 if (game_window) {
-                    game_window->HighlightDropTarget(Fl::event_x_root(), Fl::event_y_root());
+                    game_window->HighlightDropTarget(Fl::event_x(), Fl::event_y());
                 }
 
                 parent()->redraw();
@@ -67,8 +73,11 @@ int CardWidget::handle(int event)
                 dragging = false;
                 box(FL_FLAT_BOX);
 
-                int drop_x = Fl::event_x_root();
-                int drop_y = Fl::event_y_root();
+                int drop_x = Fl::event_x();
+                int drop_y = Fl::event_y();
+                if (abs(drop_x-drag_start_x) < 4 && abs(drop_y-drag_start_y) < 4) {
+                    setSelected(!selected); ReturnToOriginal(); return 1;
+                }
 
                 // Try to play the card
                 if (game_window) {
@@ -76,8 +85,8 @@ int CardWidget::handle(int event)
                         // Failed to play - return to original position
                         ReturnToOriginal();
                     } else {
-                        // Success - hide this card
-                        hide();
+                        // Wait for the server to confirm the move.
+                        ReturnToOriginal();
                     }
                     game_window->ClearDropTargetHighlight();
                 } else {
@@ -130,14 +139,14 @@ GameWindow::GameWindow(Server& srv, AppState& st)
         : Fl_Window(1500, 1000, srv.GetGameState() ? srv.GetGameState()->GetGameName() : "Game"),
           server(srv), state(st), game(srv.GetGameState())
 {
-    if(game == nullptr) {
-        return;
-    }
-    this->begin();
-    initUI();
-    clearUI();
-    this->end();
-    this->show();
+    callback([](Fl_Widget*, void* data) {
+        static_cast<GameWindow*>(data)->server.send_string("#leave");
+    }, this);
+}
+void GameWindow::AppendChat(const std::string& text) {
+    chat_history += text + "\n";
+    if (chat_history.size() > 12000) chat_history.erase(0, chat_history.find('\n', chat_history.size()-10000)+1);
+    if (chat_output) chat_output->value(chat_history.c_str());
 }
 
 void GameWindow::initUI()
@@ -149,18 +158,33 @@ void GameWindow::initUI()
     
     this->begin();
     
+    auto* leave = new Fl_Button(1250, 20, 200, 35, "Leave lobby");
+    leave->callback([](Fl_Widget*, void* data) { static_cast<GameWindow*>(data)->server.send_string("#leave"); }, this);
+    chat_output = new Fl_Multiline_Output(1170, 100, 310, 490, "Lobby chat");
+    chat_output->value(chat_history.c_str());
+    chat_input = new Fl_Input(1170, 610, 220, 30);
+    chat_input->maximum_size(240);
+    auto send_chat = [](Fl_Widget*, void* data) {
+        auto* gw = static_cast<GameWindow*>(data);
+        if (*gw->chat_input->value()) {
+            std::string message = std::string("#chat ") + gw->chat_input->value();
+            if (gw->server.send_string(message.c_str())) gw->chat_input->value("");
+        }
+    };
+    chat_input->when(FL_WHEN_ENTER_KEY); chat_input->callback(send_chat, this);
+    auto* send = new Fl_Button(1400, 610, 80, 30, "Send"); send->callback(send_chat, this);
     // Player list on the left
     int startX = 20;
     int startY = 20;
     int boxHeight = 30;
-    int n = 0;
     
     if (game) {
         for (int i = 0; i < game->GetPlayersCount(); ++i) {
             std::string player_info = std::string(game->GetPlayer(i).name) + 
                                      " (" + std::to_string(game->GetPlayerCardsCount(i)) + ")";
             Fl_Box* player_box = new Fl_Box(startX, startY + i * (boxHeight + 5), 
-                                           150, boxHeight, strdup(player_info.c_str()));
+                                           150, boxHeight);
+            player_box->copy_label(player_info.c_str());
             player_box->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
             player_boxes.push_back(player_box);
         }
@@ -168,7 +192,8 @@ void GameWindow::initUI()
         std::string trump_text = "Trump: ";
         trump_text += game->GetTrumpSuit();
         trump_box = new Fl_Box(startX, startY + game->GetPlayersCount() * (boxHeight + 5) + 20,
-                              150, boxHeight, strdup(trump_text.c_str()));
+                              150, boxHeight);
+        trump_box->copy_label(trump_text.c_str());
         trump_box->box(FL_BORDER_BOX);
         trump_box->labelfont(FL_BOLD);
         trump_box->color(FL_RED);
@@ -180,7 +205,7 @@ void GameWindow::initUI()
     status_label->labelsize(16);
     
     if((game->GetPlayersCount() > 1) && (server.GetPlayerId() == game->GetPlayer(0).id)) {
-        start_btn = new Fl_Button(200, 80, 500, 40, "Start");
+        start_btn = new Fl_Button(200, 80, 500, 40, game->Result().empty() ? "Start" : "Restart");
         start_btn->callback(start_callback, this);
     } else {
         start_btn = nullptr;
@@ -232,51 +257,11 @@ void GameWindow::initUI()
 
 void GameWindow::clearUI()
 {
-    this->begin();
-    
-    // Delete player boxes
-    for (auto* box : player_boxes) {
-        if(box) {
-            this->remove(box); 
-            delete box;
-        }
-    }
-    player_boxes.clear();
-    
-    // Delete trump box
-    if (trump_box) {
-        this->remove(trump_box);
-        delete trump_box;
-        trump_box = nullptr;
-    }
-    
-    // Delete other widgets
-    if (status_label) {
-        this->remove(status_label);
-        delete status_label;
-        status_label = nullptr;
-    }
-    
-    if (start_btn) {
-        this->remove(start_btn);
-        delete start_btn;
-        start_btn = nullptr;
-    }
-    
-    if (take_btn) {
-        this->remove(take_btn);
-        delete take_btn;
-        take_btn = nullptr;
-    }
-    
-    if (pass_btn) {
-        this->remove(pass_btn);
-        delete pass_btn;
-        pass_btn = nullptr;
-    }
-    
-    this->end();
-    this->redraw();
+    clear();
+    player_boxes.clear(); player_cards.clear(); table_cards.clear();
+    start_btn = attack_btn = defend_btn = take_btn = pass_btn = nullptr;
+    status_label = trump_box = drop_zone = nullptr;
+    chat_output = nullptr; chat_input = nullptr; highlighted_target = nullptr;
 }
 
 
@@ -287,6 +272,11 @@ void GameWindow::UpdateUI()
         return;
     }
 
+    std::string draft = chat_input ? chat_input->value() : "";
+    bool chat_focused = chat_input && Fl::focus() == chat_input;
+    clearUI(); initUI();
+    chat_input->value(draft.c_str());
+    if (chat_focused) chat_input->take_focus();
     if (game->GetGameId() != -1) {
         this->begin();
         updatePlayerCards();
@@ -359,7 +349,7 @@ void GameWindow::updateTableCards()
         int x = tableStartX + i * 140;
         
         // Attacking card
-        if ((game->GetTableAttack().size() != 0) && (game->GetTableAttack()[i].rank[0] != '\0')) {
+        if ((game->GetTableAttack().size() > static_cast<size_t>(i)) && (game->GetTableAttack()[i].rank[0] != '\0')) {
             CardWidget* attack_card = new CardWidget(
                 x, tableY, 
                 game->GetTableAttack()[i], 
@@ -425,50 +415,20 @@ void GameWindow::updateStatus() {
     if(game == nullptr) {
         return;
     }
-    int btnY = 750;
-    int btnW = 100;
-    int btnH = 30;
-    int btnSpacing = 10;
-    int btnStartX = (w() - (btnW * 4 + btnSpacing * 3)) / 2;
-
-    this->begin();
-
-    std::string status = "Attacker: ";
-    if (game->GetCurrentAttacker() >= 0 && game->GetCurrentAttacker() < game->GetPlayersCount()) {
-        status += game->GetPlayer(game->GetCurrentAttacker()).name;
-    }
-    status += " | Defender: ";
-    if (game->GetCurrentDefender() >= 0 && game->GetCurrentDefender() < game->GetPlayersCount()) {
-        status += game->GetPlayer(game->GetCurrentDefender()).name;
-    }
-
-    if(game->GetCurrentDefender() == server.GetProfile().id) {
-        if (pass_btn) {
-            this->remove(pass_btn);
-            delete pass_btn;
-            pass_btn = nullptr;
-        }
-
-        take_btn = new Fl_Button(btnStartX + (btnW + btnSpacing) * 2, btnY, btnW, btnH, "Take");
-        take_btn->callback(take_callback, this);
-        take_btn->color(FL_YELLOW);
-    } else {
-        if (take_btn) {
-            this->remove(take_btn);
-            delete take_btn;
-            take_btn = nullptr;
-        }
-
-        pass_btn = new Fl_Button(btnStartX + (btnW + btnSpacing) * 2, btnY, btnW, btnH, "Pass");
-        pass_btn->callback(pass_callback, this);
-        pass_btn->color(FL_GREEN);
-    }
-
-
+    bool active = game->IsGameStarted();
+    if (start_btn) { if (active) start_btn->hide(); else start_btn->show(); }
+    auto enable = [](Fl_Widget* w, bool value) { if (value) w->activate(); else w->deactivate(); };
+    bool defending = game->GetCurrentDefender() == server.GetPlayerId();
+    enable(attack_btn, active && !defending);
+    enable(defend_btn, active && defending);
+    enable(take_btn, active && defending);
+    enable(pass_btn, active && game->GetCurrentAttacker() == server.GetPlayerId());
+    std::string status = game->Result();
+    if (active && game->GetCurrentAttacker() >= 0 && game->GetCurrentDefender() >= 0) {
+        status = "Attacker: " + game->GetPlayer(game->GetCurrentAttacker()).name +
+                 " | Defender: " + game->GetPlayer(game->GetCurrentDefender()).name;
+    } else if (status.empty()) status = "Waiting for host (minimum 2 players)";
     status_label->copy_label(status.c_str());
-
-    this->end();
-    this->redraw();
 }
 
 
@@ -480,9 +440,7 @@ void GameWindow::UpdateDropZoneLabel() {
     
     // Check if there are undefended cards on table
     int undefended_count = 0;
-    if (game->GetTableAttack().size() > game->GetTableDefense().size()) {
-        undefended_count = game->GetTableAttack().size() - game->GetTableDefense().size();
-    }
+    for (const auto& card : game->GetTableDefense()) if (!card.rank[0]) ++undefended_count;
     
     if (undefended_count > 0) {
         std::string label = "Drop card on attacking card to defend\n";
@@ -546,7 +504,7 @@ void GameWindow::ClearDropTargetHighlight() {
 
 // Try to play a card - returns true if successful
 bool GameWindow::TryPlayCard(const Card& card, int drop_x, int drop_y) {
-    if (!game) return false;
+    if (!game || !game->IsGameStarted()) return false;
     
 
     // Check if dropped in general table area
@@ -587,8 +545,7 @@ bool GameWindow::TryPlayCard(const Card& card, int drop_x, int drop_y) {
             }
         }
         
-        if ((static_cast<size_t>(target_index) >= 0) && 
-            (static_cast<size_t>(target_index) <= game->GetTableDefense().size())) {
+        if (target_index >= 0 && static_cast<size_t>(target_index) < game->GetTableDefense().size() && !game->GetTableDefense()[target_index].rank[0]) {
             // This attack card is not defended yet
             msg = "#defend ";
             msg += card.rank;
@@ -596,7 +553,7 @@ bool GameWindow::TryPlayCard(const Card& card, int drop_x, int drop_y) {
 
             msg += " ";
             msg += std::to_string(target_index);
-            msg += '\n';
+
 
             printf("Defending against %s%c with %s%c\n", 
                    target.rank, target.suit, card.rank, card.suit);
@@ -609,7 +566,7 @@ bool GameWindow::TryPlayCard(const Card& card, int drop_x, int drop_y) {
         msg = "#attack ";
         msg += card.rank;
         msg += card.suit;
-        msg += '\n';
+
         
         printf("Attacking with %s%c\n", card.rank, card.suit);
     }
@@ -650,34 +607,34 @@ CardWidget* GameWindow::FindTableCardAt(int x, int y)
 }
 
 
-void GameWindow::start_callback(Fl_Widget* w, void* data) 
+void GameWindow::start_callback(Fl_Widget*, void* data)
 {
     GameWindow* gw = static_cast<GameWindow*>(data);
     gw->performStart();
 }
 
-void GameWindow::attack_callback(Fl_Widget* w, void* data) 
+void GameWindow::attack_callback(Fl_Widget*, void* data)
 {
     GameWindow* gw = static_cast<GameWindow*>(data);
     gw->performAttack();
 }
 
 
-void GameWindow::defend_callback(Fl_Widget* w, void* data) 
+void GameWindow::defend_callback(Fl_Widget*, void* data)
 {
     GameWindow* gw = static_cast<GameWindow*>(data);
     gw->performDefend();
 }
 
 
-void GameWindow::take_callback(Fl_Widget* w, void* data) 
+void GameWindow::take_callback(Fl_Widget*, void* data)
 {
     GameWindow* gw = static_cast<GameWindow*>(data);
     gw->performTake();
 }
 
 
-void GameWindow::pass_callback(Fl_Widget* w, void* data) 
+void GameWindow::pass_callback(Fl_Widget*, void* data)
 {
     GameWindow* gw = static_cast<GameWindow*>(data);
     gw->performPass();
@@ -687,13 +644,6 @@ void GameWindow::pass_callback(Fl_Widget* w, void* data)
 void GameWindow::performStart() 
 {
     server.send_string("#game_start");
-    if (start_btn) {
-        remove(start_btn);
-        delete start_btn;
-        start_btn = nullptr;
-    }
-    redraw();
-    
 }
 
 
@@ -722,25 +672,18 @@ void GameWindow::performAttack()
 
 void GameWindow::performDefend() 
 {
-    // Collect selected cards for defense
-    std::string msg = "#defend";
-    bool has_cards = false;
-
-    for (auto* card_widget : player_cards) {
-        if (card_widget->isSelected()) {
-            Card c = card_widget->getCard();
-            msg += " ";
-            msg += c.rank;
-            msg += c.suit;
-            has_cards = true;
-        }
+    int pair = -1;
+    for (size_t i = 0; i < game->GetTableDefense().size(); ++i)
+        if (!game->GetTableDefense()[i].rank[0]) { pair = static_cast<int>(i); break; }
+    CardWidget *selected = nullptr;
+    for (auto *card : player_cards) if (card->isSelected()) {
+        if (selected) { fl_message("Select one defense card."); return; }
+        selected = card;
     }
-
-    if (has_cards) {
-        server.send_string(msg.c_str());
-    } else {
-        fl_message("Select cards to defend!");
-    }
+    if (!selected || pair < 0) { fl_message("Select one card and an undefended attack."); return; }
+    Card c = selected->getCard();
+    std::string cmd = std::string("#defend ") + c.rank + c.suit + " " + std::to_string(pair);
+    server.send_string(cmd.c_str());
 }
 
 
@@ -755,9 +698,7 @@ void GameWindow::performPass()
 {
     // Pass turn
     server.send_string("#pass");
-    server.GetGameState()->GetTableAttack().clear();
 
-    server.GetGameState()->GetTableDefense().clear();
 }
 
 // Function to create game window

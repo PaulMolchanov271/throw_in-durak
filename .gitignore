@@ -1,0 +1,10 @@
+obj/
+server
+client_c
+throw_in_durak
+tests/server_test
+userdata.txt
+stats.txt
+*.log
+__pycache__/
+tests/client_test

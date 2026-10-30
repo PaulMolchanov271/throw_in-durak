@@ -35,8 +35,8 @@ enum {
 
 struct Profile {
     int id = -1;
-    char *name;
-    int wins, loses;
+    std::string name;
+    int wins = 0, loses = 0;
 };
 
 class GameWindow;
@@ -52,6 +52,8 @@ struct AppState {
     Fl_Window *createGameWin = NULL;
     GameWindow *gameWin = NULL;
     Fl_Multiline_Output *chatOutput = NULL;
+    Fl_Window *profileWin = nullptr;
+    Fl_Multiline_Output *profileOutput = nullptr;
 };
 
 struct AppInput {
@@ -69,7 +71,7 @@ struct Card {
 // Player structure
 struct Player {
     int id = -1;
-    int cards_count;
+    int cards_count = 0;
     std::string name;
 };
 
@@ -77,11 +79,12 @@ struct Player {
 class Game {
 private:
     int id;
-    char *name = nullptr;
+    std::string name;
     int players_count;
     Player players[8];
     std::vector<Card> hand;
     bool is_started;
+    std::string result;
     char trump_suit;
     std::vector<Card> table_attack;
     std::vector<Card> table_defense;
@@ -90,14 +93,14 @@ private:
     int current_defender_index;
     
 public:
-    Game() : id(-1), name(nullptr), players_count(0), is_started(false), 
+    Game() : id(-1), name(), players_count(0), is_started(false),
              trump_suit('\0'), table_count(0), current_attacker_index(-1), current_defender_index(-1) {}
     Game(int game_id, const char* game_name, int players_cnt, bool started); 
     
     ~Game();
     
     int GetGameId() const { return id; }
-    char *GetGameName() const { return name; }
+    const char *GetGameName() const { return name.c_str(); }
     int GetPlayerCardsCount(int player_index) const { return players[player_index].cards_count; }
     Player &GetPlayer(int index) { return players[index]; }
     char GetTrumpSuit() const { return trump_suit; }
@@ -116,7 +119,10 @@ public:
     void SetPlayersCount(int pc); 
     void SetTrumpSuit(char tr) { trump_suit = tr; }
     void SetTableCount(int tc) { table_count = tc; } 
-    void StartGame() { is_started = true; }
+    void StartGame() { is_started = true; result.clear(); hand.clear(); table_attack.clear(); table_defense.clear(); }
+    void FinishGame(const std::string& text) { is_started = false; result = text; }
+    const std::string& Result() const { return result; }
+    void ResetPlayers() { for (auto& p : players) p = Player{}; players_count = 0; }
 };
 
 enum class GameCmd {
@@ -181,6 +187,9 @@ public:
     bool is_running() const;
     bool send_string(const char *str) const;
     char *fetch_buffer();
+    char *wait_response();
+    void PumpMessages();
+    void ShowProfile();
     bool authenticate(const char *user, const char *pass);
     void ProcessGameMessage(const char* msg);
     int GetPlayerId();

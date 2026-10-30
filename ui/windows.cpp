@@ -104,10 +104,10 @@ void GuestButton::OnPress() {
     server.send_string("3");
     
     char *msg = nullptr;
-    while(msg == nullptr) {
-        msg = server.fetch_buffer();
-    }
+    msg = server.wait_response();
+    if (!msg) return;
     server.GetProfile().name = msg;
+    delete[] msg;
     
     state.mainWin->hide();
     state.mainMenuWin->label("Main menu");
@@ -118,7 +118,7 @@ void GuestButton::OnPress() {
 void OKButton::OnPress() 
 {
     const char *name = name_field->value();
-    const char *pass = password_field->value();
+    const char *pass = password_field ? password_field->value() : "";
     int player_id = -1, cards_count = -1;
     char player_name[64];
 
@@ -130,13 +130,11 @@ void OKButton::OnPress()
         std::string msg = std::string("#create ") + name;
         server.send_string(msg.c_str());
         char *recv_info = nullptr;
-        while(recv_info == nullptr) {
-            recv_info = server.fetch_buffer();
-        }
-        int game_id = 0, i = 0;
-        while(recv_info[i] != '\0') {
-            game_id = game_id * 10 + (recv_info[i] - 48);
-            i++;
+        recv_info = server.wait_response();
+        if (!recv_info) return;
+        int game_id = -1;
+        if (sscanf(recv_info, "%d", &game_id) != 1) {
+            fl_message("%s", recv_info); delete[] recv_info; return;
         }
 
         if(state.gameWin) {
@@ -148,15 +146,15 @@ void OKButton::OnPress()
 
         delete[] recv_info;
         recv_info = nullptr;
-        while(recv_info == nullptr) {
-            recv_info = server.fetch_buffer();
-        }
-        sscanf(recv_info, "#player %d %s %d", &player_id, player_name, &cards_count);
+        recv_info = server.wait_response();
+        if (!recv_info) return;
+        sscanf(recv_info, "#player %d %63s %d", &player_id, player_name, &cards_count);
         delete[] recv_info;
         recv_info = nullptr;
 
         server.GetProfile().id = server.GetGameState()->GetPlayer(0).id = player_id;
         server.GetGameState()->GetPlayer(0).cards_count = cards_count;
+        server.GetGameState()->GetPlayer(0).name = player_name;
         state.gameWin = static_cast<GameWindow*>(createGameWindow(server, state/*, game*/));
 
         state.gameWin->label(name);
@@ -225,41 +223,21 @@ JoinButton::JoinButton(
 }
 
 void JoinButton::OnPress() {
-    // 1. Send join command
     std::string msg = "#join " + std::to_string(game->GetGameId());
     server.send_string(msg.c_str());
-
-    // 2. Hide current window
-    if (state.current_state)
-        state.current_state->hide();
-
-    // 3. Destroy previous game window
-    delete state.gameWin;
-    state.gameWin = nullptr;
-
-    // 4. Update server state
-    server.SetGame(game);
-
-    auto* gs = server.GetGameState();
-    if (gs && gs->GetPlayersCount() > 0) {
-        server.GetProfile().id =
-            gs->GetPlayer(gs->GetPlayersCount() - 1).id;
+    char *reply = server.wait_response();
+    if (!reply) return;
+    if (strcmp(reply, "#joined") != 0) {
+        fl_message("%s", reply); delete[] reply; return;
     }
-    gs->SetPlayersCount(0);
-
-    // 5. Create new game window
-    state.gameWin =
-        static_cast<GameWindow*>(createGameWindow(server, state));
-
-    state.gameWin->label(game->GetGameName());
-
-    // 6. Switch state
+    delete[] reply;
+    if (state.current_state) state.current_state->hide();
+    delete state.gameWin; state.gameWin = nullptr;
+    // The game list owns its entries; the active match has its own model.
+    server.SetGame(new Game(game->GetGameId(), game->GetGameName(), 0, false));
+    state.gameWin = static_cast<GameWindow*>(createGameWindow(server, state));
     state.current_state = state.gameWin;
-
-    // 7. Init UI
-    state.gameWin->clearUI();
-    state.gameWin->initUI();
-    state.gameWin->show();
+    state.gameWin->initUI(); state.gameWin->show();
 }
 
 
@@ -267,86 +245,40 @@ void JoinButton::OnPress() {
 // Parse games from server response
 //////////////////////////////////////////////
 
-void parse_games(const char* msg, Game **games, int& games_count) {
-    int game_size = 10;
-
-    const char* ptr = msg;
-    while (*ptr) {
-        int id, player_count, is_started;
-        char name[64];
-
-        int matched = sscanf(ptr, "%d %63s %d %d\n", &id, name, &player_count, &is_started);
-        if (matched == 4) {
-            if (games_count == game_size) {
-                int new_size = game_size * 2;
-                Game **new_games = new Game*[new_size];
-
-                for (int i = 0; i < game_size; ++i) {
-                    new_games[i] = games[i];
-                }
-
-                delete[] games;
-                games = new_games;
-                game_size = new_size;
-            }
-
-            games[games_count] = new Game(id, name, player_count, (is_started != 0));
-
-            games_count++;
-        }
-
-        while (*ptr && *ptr != '\n') ptr++;
-        if (*ptr == '\n') ptr++;
-    }
+void parse_games(const char* msg, std::vector<Game*>& games) {
+    int id, count, started;
+    char name[64];
+    if (sscanf(msg, "%d %63s %d %d", &id, name, &count, &started) == 4)
+        games.push_back(new Game(id, name, count, started != 0));
 }
-
 
 ListGamesButton::ListGamesButton(int x, int y, const char *lb, AppState& st, Server& serv)
     : OOFLButton(x, y, 120, 30, lb),
       state(st),
       server(serv),
-      games(new Game*[10]),
+      games(),
       game_count(0),
       msg(nullptr),
       i(0)
 {}
 
 void ListGamesButton::OnPress() {
-    server.send_string("#list");
-    msg = nullptr;
-    i = 0;
-    game_count = 0;
-
-    state.current_state->hide();
+    if (state.current_state) state.current_state->hide();
     state.current_state = state.listGamesWin;
-
-    while((msg == nullptr) && (i < 50)) {
-        msg = server.fetch_buffer();
-        usleep(100000);
-        i++;
+    delete state.listGamesWin; state.listGamesWin = nullptr;
+    for (auto* g : games) delete g;
+    games.clear();
+    server.send_string("#list");
+    while (char *line = server.wait_response()) {
+        bool done = strcmp(line, "#list_end") == 0;
+        if (!done) parse_games(line, games);
+        delete[] line;
+        if (done) break;
     }
-    i = 0;
-
-    if(msg) {
-        while(msg != nullptr) {
-            parse_games(msg, games, game_count);
-            if (state.listGamesWin) {
-                delete state.listGamesWin;
-            }
-            state.listGamesWin = createListGameWindow(server, state, games, game_count);
-            state.listGamesWin->show();
-            state.current_state = state.listGamesWin;
-
-            delete [] msg;
-            msg = nullptr;
-            msg = server.fetch_buffer();
-        }
-    } else {
-        state.current_state = state.mainMenuWin;
-        state.current_state->show();
-    }
+    state.listGamesWin = createListGameWindow(server, state, games.data(), static_cast<int>(games.size()));
+    state.current_state = state.listGamesWin;
+    state.listGamesWin->show();
 }
-
 
 CreateGameButton::CreateGameButton(int x, int y, const char* lb, AppState& st)
     : OOFLButton(x, y, 120, 30, lb),
@@ -411,7 +343,11 @@ Fl_Window* createMainMenuWindow(AppState& state, Server& server)
 
     new ListGamesButton(spacing, spacing, "List of games", state, server);
     new CreateGameButton(spacing * 2 + button_w, spacing, "Create game", state);
-    new ExitButton(spacing * 3 + button_w * 2, spacing, "Exit");
+    auto* profile = new Fl_Button(spacing * 3 + button_w * 2, spacing, 90, 30, "Profile");
+    profile->callback([](Fl_Widget*, void* data) {
+        static_cast<Server*>(data)->ShowProfile();
+    }, &server);
+    new ExitButton(winW - 100, spacing, "Exit");
 
     state.chatOutput = new Fl_Multiline_Output(
         spacing,
@@ -438,15 +374,14 @@ Fl_Window* createMainMenuWindow(AppState& state, Server& server)
         inputHeight,
         "Send");
     sendBtn->callback([](Fl_Widget*, void* data) {
-        auto* p = static_cast<std::pair<Fl_Input*, Server*>*>(data);
-        const char* text = p->first->value();
-        if (text && *text) {
-            p->second->send_string(text);
-            p->first->value("");
-        }
-    }, new std::pair<Fl_Input*, Server*>(chatInput, &server));
+        auto* input = static_cast<Fl_Input*>(data);
+        send_chat_message(input, input->user_data());
+    }, chatInput);
 
     win->end();
+    state.profileWin = new Fl_Window(340, 200, "Profile");
+    state.profileOutput = new Fl_Multiline_Output(20, 35, 300, 140, "Player statistics");
+    state.profileWin->end();
     return win;
 }
 

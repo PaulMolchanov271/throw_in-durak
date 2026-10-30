@@ -11,6 +11,7 @@ Card parse_card(const char* card_str) {
     int len = strlen(card_str);
 
     // Last character is suit
+    if (len < 2 || len > 3) return card;
     card.suit = card_str[len - 1];
 
     // Rest is rank
@@ -21,26 +22,14 @@ Card parse_card(const char* card_str) {
 }
 
 Game::Game(int game_id, const char* game_name, int players_cnt, bool started)
-    : id(game_id), name(nullptr), players_count(players_cnt), is_started(started),
-      trump_suit('\0'), table_count(0), current_attacker_index(-1), current_defender_index(-1)
-{
-    if (game_name) {
-        name = new char[strlen(game_name) + 1];
-        strcpy(name, game_name);
-    }
-}
+    : id(game_id), name(game_name ? game_name : ""), players_count(players_cnt), is_started(started),
+      trump_suit('\0'), table_count(0), current_attacker_index(-1), current_defender_index(-1) {}
 
-
-Game::~Game()
-{
-    if (name) {
-        delete[] name;
-    }
-}
+Game::~Game() = default;
 
 void Game::SetPlayersCount(int pc) 
 {
-    if((pc >= 0) && (pc < 8)) {
+    if((pc >= 0) && (pc <= 8)) {
         players_count = pc;
     } 
 }
@@ -53,13 +42,8 @@ Server::~Server()
         shutdown(sock, SHUT_RDWR);
         close(sock);
     }
-    if(game) {
-        delete game;
-    }
-
-    if (recv_thread.joinable()) {
-        recv_thread.join();
-    }
+    if (recv_thread.joinable()) recv_thread.join();
+    delete game;
 }
 
 void Server::start(const std::string& host_, int port_)
@@ -103,19 +87,14 @@ bool Server::is_running() const
 
 bool Server::send_string(const char *str) const
 {
-    size_t len;
-    if(str != nullptr) {
-        len = strlen(str);
-    } else {
-        len = 0;
-    }
-    char buffer[len + 1];
-
-    memcpy(buffer, str, len);
-    buffer[len] = '\n';
-    if (send(sock, buffer, len+1, 0) < 0) {
-        perror("Failed to send message");
-        return false;
+    if (!str || !running) return false;
+    std::string message = std::string(str) + "\n";
+    size_t offset = 0;
+    while (offset < message.size()) {
+        ssize_t n = send(sock, message.data()+offset, message.size()-offset, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        offset += n;
     }
     return true;
 }
@@ -148,23 +127,29 @@ char *Server::fetch_buffer()
 
 // Trigger window update from main thread using FLTK's awake mechanism
 void Server::TriggerWindowUpdate() {
-    Game *g = game;
-    // This is called from network thread, need to update UI from main thread
-    Fl::awake([](void* data) {
-        auto* params = static_cast<std::pair<AppState*, Game*>*>(data);
-
-        AppState* st = params->first;
-        Game* g     = params->second;
-
-        if (st->gameWin) {
-            if(st->gameWin->GetGame()->IsGameStarted()) {
-                st->gameWin->UpdateUI();
-            } else {
-                st->gameWin->clearUI();
-                st->gameWin->initUI();
-            }
-        }
-    }, new std::pair<AppState*, Game*>(&state, g));
+    if (state.gameWin && state.current_state == state.gameWin) state.gameWin->UpdateUI();
+}
+char *Server::wait_response() {
+    for (int i = 0; i < 500 && running; ++i) {
+        if (char *line = fetch_buffer()) return line;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    fl_message("Server did not respond. Please reconnect.");
+    return nullptr;
+}
+void Server::ShowProfile() {
+    state.profileOutput->value("Loading profile...");
+    state.profileWin->show();
+    send_string("#profile");
+}
+void Server::PumpMessages() {
+    if (state.current_state != state.mainMenuWin && state.current_state != state.gameWin) return;
+    bool changed = false;
+    while (char *line = fetch_buffer()) {
+        changed = changed || (line[0] == '#' && strncmp(line, "#chat ", 6) != 0 && strncmp(line, "#profile ", 9) != 0);
+        ReceiveMessage(line); delete[] line;
+    }
+    if (changed) TriggerWindowUpdate();
 }
 
 GameCmd getCommand(const char* msg) {
@@ -185,6 +170,7 @@ GameCmd getCommand(const char* msg) {
 
 void Server::ProcessGameMessage(const char* msg)
 {
+    if (!game && getCommand(msg) != GameCmd::ERROR) return;
     switch (getCommand(msg))
     {
         case GameCmd::GAME_START: {
@@ -192,8 +178,7 @@ void Server::ProcessGameMessage(const char* msg)
             int player_count;
             sscanf(msg, "#game_start %c %d", &trump_suit, &player_count);
 
-            if (game != nullptr)
-                perror("game does not exist at the start of the game");
+
 
             game->SetTrumpSuit(trump_suit);
             game->SetPlayersCount(player_count);
@@ -207,11 +192,11 @@ void Server::ProcessGameMessage(const char* msg)
             char name[64];
             sscanf(msg, "#player %d %63s %d", &index, name, &cards_count);
 
-            if ((game != nullptr) && (index < 8)) {
+            if ((game != nullptr) && (index >= 0 && index < 8)) {
                 if((game->GetPlayer(index).id == -1) && (game->IsGameStarted() == false)) {
-                    game->SetPlayersCount(game->GetPlayersCount() + 1);
+                    game->SetPlayersCount(std::max(game->GetPlayersCount(), index + 1));
                 }
-                if(strcmp(prof.name, name) == 0) {
+                if(prof.name == name) {
                     prof.id = index;
                 }
                 game->GetPlayer(index).id = index;
@@ -225,9 +210,8 @@ void Server::ProcessGameMessage(const char* msg)
             game->GetHand().clear();
             const char* ptr = msg + 12;
             char card_str[4];
-            int i;
-            for(i = 0; game->GetPlayer(i).id != GetProfile().id; i++) {}
-            auto &player = game->GetPlayer(i);
+            if (prof.id < 0 || prof.id >= 8) break;
+            auto &player = game->GetPlayer(prof.id);
             while (sscanf(ptr, "%3s", card_str) == 1) {
                 game->GetHand().push_back(parse_card(card_str));
                 ptr = strchr(ptr, ' ');
@@ -251,54 +235,23 @@ void Server::ProcessGameMessage(const char* msg)
             sscanf(msg, "#table %d", &pair_count);
             if (game != nullptr) {
                 game->SetTableCount(pair_count);
+                game->GetTableAttack().clear(); game->GetTableDefense().clear();
             }
         } break;
 
         case GameCmd::PAIR: {
-            char attack_str[6] = {0};
-            char defense_str[6] = {0};
-            
-            Card attack_card;
-            Card defense_card;
-            
-            bool attack_dup = false;
-            bool defense_dup = false;
-            int matched = sscanf(msg, "#pair %5s %5s", attack_str, defense_str);
-            
-            attack_card = parse_card(attack_str);
-            if(matched == 2) {
-                defense_card = parse_card(defense_str);
-            }
-            
-            if (game != nullptr) {
-                for(size_t i = 0; i < game->GetTableAttack().size(); i++) {
-                    if((i < game->GetTableAttack().size()) && (attack_card.rank[0] == game->GetTableAttack()[i].rank[0]) 
-                        && (attack_card.suit == game->GetTableAttack()[i].suit)) {
-                        attack_dup = true;
-                    }
-                    
-                    if((i < game->GetTableDefense().size()) && (defense_card.rank[0] == game->GetTableDefense()[i].rank[0]) 
-                        && (defense_card.suit == game->GetTableDefense()[i].suit)) {
-                        defense_dup = true;
-                    }
-                }
-
-                
-                if((attack_dup == false) && (game->GetTableCount() - game->GetTableAttack().size()) > 0) {
-                    game->GetTableAttack().push_back(attack_card);
-                    game->SetTableCount(game->GetTableCount() + 1);
-                }
-                
-                if((matched == 2) && (defense_dup == false) && ((game->GetTableCount() - game->GetTableDefense().size()) > 0)) {
-                    game->GetTableDefense().push_back(defense_card);
-                }
+            char attack[6] = {}, defense[6] = {};
+            int n = sscanf(msg, "#pair %5s %5s", attack, defense);
+            if (n >= 1) {
+                game->GetTableAttack().push_back(parse_card(attack));
+                game->GetTableDefense().push_back(n == 2 ? parse_card(defense) : Card{});
             }
         } break;
 
         case GameCmd::PLAYER_UPDATE: {
             int index, cards_count;
             sscanf(msg, "#player_update %d %d", &index, &cards_count);
-            if ((game != nullptr) && (index < 8)) {
+            if ((game != nullptr) && (index >= 0 && index < 8)) {
                 game->UpdatePlayerCardsCount(index, cards_count); 
             }
         } break;
@@ -331,14 +284,10 @@ void Server::ProcessGameMessage(const char* msg)
         } break;
 
         case GameCmd::GAME_END: {
-            int loser_idx;
-            sscanf(msg, "#game_end %d", &loser_idx);
-            printf("Game ended! Loser: %d\n", loser_idx);
-            Fl::awake([](void* data) {
-                int* loser = static_cast<int*>(data);
-                fl_message("Game Over! Player %d lost.", *loser);
-                delete loser;
-            }, new int(loser_idx));
+            int winner = -1;
+            sscanf(msg, "#game_end %d", &winner);
+            bool won = winner == prof.id || winner == -2;
+            game->FinishGame(won ? "You won! The host can restart the match." : "You lost. The host can restart the match.");
         } break;
 
         case GameCmd::ERROR: {
@@ -358,7 +307,6 @@ void Server::ProcessGameMessage(const char* msg)
             break;
     }
     
-    TriggerWindowUpdate();
 }
 
 
@@ -366,6 +314,28 @@ void Server::ReceiveMessage(const std::string& msg)
 {
     if (msg.empty()) return;
 
+    if (msg.rfind("#profile ", 0) == 0) {
+        char name[64]; int wins, losses;
+        if (sscanf(msg.c_str(), "#profile %63s %d %d", name, &wins, &losses) == 3) {
+            prof.wins = wins; prof.loses = losses;
+            if (state.profileOutput) {
+                std::string text = std::string(name) + "\nWins: " + std::to_string(wins) + "\nLosses: " + std::to_string(losses);
+                state.profileOutput->value(text.c_str());
+            }
+        }
+        return;
+    }
+    if (msg == "#left") {
+        if (state.gameWin) state.gameWin->hide();
+        state.current_state = state.mainMenuWin; state.mainMenuWin->show(); return;
+    }
+    if (msg.rfind("#lobby ", 0) == 0 && game) {
+        game->ResetPlayers(); return;
+    }
+    if (msg.rfind("#chat ", 0) == 0) {
+        if (state.gameWin && state.current_state == state.gameWin) state.gameWin->AppendChat(msg.substr(6));
+        return;
+    }
     if (msg[0] == '#') {
         ProcessGameMessage(msg.c_str());
     } else {
@@ -410,28 +380,11 @@ void Server::recv_loop()
             {
                 std::lock_guard<std::mutex> lock(buf_mutex);
                 recv_buffer.append(buf);
+                Fl::awake();
             }
         }
         
-        if ((state.current_state == state.mainMenuWin) ||
-            (state.current_state == state.gameWin))
-        {
-            while (true) {
-                std::string msg;
-                {
-                    std::lock_guard<std::mutex> lock(buf_mutex);
-                    size_t pos = recv_buffer.find('\n');
-                    if (pos == std::string::npos) {
-                        break;
-                    }
-                    msg = recv_buffer.substr(0, pos);
-                    recv_buffer.erase(0, pos + 1);
-                }
-                ReceiveMessage(msg);
-            }
-        } else {
-            printf("STATE CHECK FAILED\n");  // DEBUG
-        }
+
     }
 }
 
@@ -444,9 +397,8 @@ bool Server::authenticate(const char *user, const char *pass)
         return false;
     }
     char *msg = nullptr;
-    while(msg == nullptr) {
-        msg = fetch_buffer();
-    }
+    msg = wait_response();
+    if (!msg) return false;
     if(msg == nullptr) {
         return false;
     }
@@ -463,15 +415,14 @@ bool Server::authenticate(const char *user, const char *pass)
         return false;
     }
 
-    while(msg == nullptr) {
-        msg = fetch_buffer();
-    }
+    msg = wait_response();
+    if (!msg) return false;
 
     if((strcmp(msg, "You have been successfully logged into the system.") == 0)
     || (strcmp(msg, "You have been successfully Sign up to the system.") == 0)) {
         fl_message("%s", msg);
         delete [] msg;
-        prof.name = strdup(user);
+        prof.name = user;
         return true;
     }
 
@@ -508,6 +459,7 @@ void update_ui_cb(void* w) {
     Fl::repeat_timeout(0.5, update_ui_cb, w);
 }
 
+#ifndef DURAK_NO_MAIN
 int main() 
 {
     Fl::lock();
@@ -523,11 +475,19 @@ int main()
     state.createGameWin = createCreateGameWindow(server, state);
     state.gameWin       = static_cast<GameWindow*>(createGameWindow(server, state));
 
+    state.current_state = state.mainWin;
     state.mainWin->show();
 
 
     server.start("127.0.0.1", 5555);
 
-    return Fl::run();
+    Fl::add_timeout(0.05, [](void *data) {
+        auto *server = static_cast<Server*>(data);
+        server->PumpMessages();
+    }, &server);
+    while (Fl::wait()) server.PumpMessages();
+    return 0;
 }
 
+
+#endif

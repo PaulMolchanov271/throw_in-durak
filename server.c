@@ -6,6 +6,9 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <signal.h>
+#include <ctype.h>
 
 
 #ifndef INBUFSIZE
@@ -59,7 +62,7 @@ struct player_str {
 
 struct client_session {
     int sd;                            /* socket descriptor */
-    char buf[buffer_size];             /* buffer */
+    char buf[INBUFSIZE];             /* buffer */
     int bd;                            /* amount of data in the buffer */
     char *username, *password;         /* client's username and password */
     unsigned long from_ip;
@@ -126,13 +129,13 @@ char* center_text(const char* text, int width) {
 }
 
 struct client_session *make_new_session(int sd, struct sockaddr_in* from) {
-    struct client_session* sess = malloc(sizeof(struct client_session));
+    struct client_session* sess = calloc(1, sizeof(struct client_session));
     sess->sd = sd;
     sess->bd = 0;
     sess->state = fsm_start;
     sess->from_ip = ntohl(from->sin_addr.s_addr);
     sess->from_port = ntohs(from->sin_port);
-    sess->player_info = malloc(sizeof(struct player_str));
+    sess->player_info = calloc(1, sizeof(struct player_str));
     sess->player_info->game_id = -1;
     printf("connected socket %d\n", sd);
     return sess;
@@ -140,18 +143,15 @@ struct client_session *make_new_session(int sd, struct sockaddr_in* from) {
 
 static void session_send_string(int sd, const char* str)
 {
-    int length = strlen(str);
-    if (str == NULL) {
-        fprintf(stderr, "Error: NULL pointer passed to session_send_string.\n");
-        return;
+    if (!str || sd < 0) return;
+    size_t left = strlen(str);
+    while (left) {
+        ssize_t n = send(sd, str, left, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return;
+        str += n;
+        left -= n;
     }
-    if (sd <= 0) {
-        fprintf(stderr, "Error: Invalid session descriptor.\n");
-        _exit(EXIT_FAILURE);
-    }
-    send(sd, str, length, 0);
-    printf("Send message - <%s> to %d\n", str, sd);
-    return;
 }
 
 int authenticate_user(FILE* file, const char* username, const char* password) {
@@ -243,6 +243,7 @@ void game_init(struct game_session *game, int id)
 struct game_session *execute_create_game(struct server_str *serv, struct client_session *sess, char *game_name, int id)
 {
     struct game_session *game = malloc(sizeof(*game));
+    (void)serv;
     int i = 0;
     char buffer[256];
     game_init(game, id);
@@ -282,7 +283,7 @@ static int execute_join_game(struct server_str *serv, struct client_session *ses
         return 1;
     }
     sess->player_info->game_id = game_id;
-    while((game->players[i] != NULL) && (i < MAX_PLAYERS)) {
+    while((i < MAX_PLAYERS) && (game->players[i] != NULL)) {
         i++;
     }
     game->players[i] = sess;
@@ -290,19 +291,19 @@ static int execute_join_game(struct server_str *serv, struct client_session *ses
     game->players[i]->player_info->card_count = 0;
     game->players[i]->player_info->id = i;
     game->player_count += 1; 
-    send_table_gui(game);
+    session_send_string(sess->sd, "#joined\n");
     char *name;
 
     i = j = 0;    
-    while((game->players[i] != NULL) && (i < MAX_PLAYERS)) {
+    while((i < MAX_PLAYERS) && (game->players[i] != NULL)) {
         j = 0;
-        while((game->players[j] != NULL) && (j < MAX_PLAYERS)) {
+        while((j < MAX_PLAYERS) && (game->players[j] != NULL)) {
             name = game->players[j]->username;
 
             snprintf(buffer, sizeof(buffer),
                  "#player %d %s %d\n",
                  j, name, game->players[j]->player_info->card_count);
-            if(i != j) {
+            {
                 session_send_string(game->players[i]->sd, buffer);
             }
             j++;
@@ -318,20 +319,27 @@ static int command_check(struct server_str* serv, struct client_session *sess, c
     char *ptr;
     if(strncmp(command, "#list", 5) == 0) {
         execute_list(serv, sess);
+        session_send_string(sess->sd, "#list_end\n");
         return 0;
     }
     if(strncmp(command, "#create", 7) == 0) {
+        if (strlen(command) < 9 || command[7] != ' ') {
+            send_error(sess->sd, "Provide a game name"); return 0;
+        }
         ptr = command + 8;
+        if (strlen(ptr) > 49 || strpbrk(ptr, " \t\r")) {
+            send_error(sess->sd, "Game name: use 1-49 characters without spaces"); return 0;
+        }
         i = 0;
-        while(serv->games_array[i] != NULL) {
+        while(i < serv->games_array_size && serv->games_array[i] != NULL) {
             i++;
         }
         if(i >= serv->games_array_size) {
             int newlen = serv->games_array_size;
             while (i >= newlen)
                 newlen += INIT_GAMES_ARR_SIZE;
-            serv->sess_array =
-                realloc(serv->games_array, newlen * sizeof(struct session*));
+            serv->games_array =
+                realloc(serv->games_array, newlen * sizeof(*serv->games_array));
             for (i = serv->games_array_size; i < newlen; i++)
                 serv->games_array[i] = NULL;
             serv->games_array_size = newlen;
@@ -342,12 +350,12 @@ static int command_check(struct server_str* serv, struct client_session *sess, c
         return 0;
     }
     if(strncmp(command, "#join", 5) == 0) {
-        int game_id = 0;
-        ptr = command + 6;
-        i = 0;
-        while((ptr[i] != ' ') && (ptr[i] != '\0')) {
-            game_id = game_id*10 + (ptr[i]-48);
-            i++;
+        int game_id = -1; char extra;
+        if (sscanf(command, "#join %d %c", &game_id, &extra) != 1) {
+            send_error(sess->sd, "Invalid game ID"); return 0;
+        }
+        if (game_id < 0 || game_id >= serv->games_array_size || !serv->games_array[game_id]) {
+            send_error(sess->sd, "Game does not exist"); return 0;
         }
         if(serv->games_array[game_id]->is_started == true) {
             session_send_string(sess->sd, "The game has already started, you can't connect to it.\n");
@@ -363,7 +371,7 @@ static int command_check(struct server_str* serv, struct client_session *sess, c
 }
 
 void shuffle_deck(int *deck, int size) {
-    srand(time(NULL));
+
     for (int i = size - 1; i > 0; --i) {
         int j = rand() % (i + 1);
         int temp = deck[i];
@@ -388,7 +396,7 @@ void format_card(int card, char *output) {
 // Distribute cards to player
 void distribute_cards(struct player_str *player, int *deck, int *deck_size) {
     if (player->hand == NULL) {
-        player->hand = calloc(6, sizeof(int));
+        player->hand = calloc(MAX_CARDS, sizeof(int));
         if (!player->hand) {
             fprintf(stderr, "Memory allocation failed for player hand.\n");
             return;
@@ -405,48 +413,116 @@ void distribute_cards(struct player_str *player, int *deck, int *deck_size) {
 }
 
 // Deal cards to all players
-void deal_cards(struct game_session* game)
-{
-    int n = 0;
-    distribute_cards(game->attacking_player->player_info, game->deck, &game->deck_size);
+void deal_cards(struct game_session* game) {
+    int first = game->attacking_player->player_info->id;
+    for (int i = 0; i < game->player_count; ++i) {
+        struct client_session *p = game->players[(first+i)%game->player_count];
+        if (p != game->defending_player) distribute_cards(p->player_info, game->deck, &game->deck_size);
+    }
     distribute_cards(game->defending_player->player_info, game->deck, &game->deck_size);
-
-    for (int j = 0; j < game->player_count+n; j++) {
-        if (game->players[j] == NULL) {
-            n++;
-            continue;
-        }
-        if((game->players[j] == game->attacking_player) || (game->players[j] == game->defending_player)) {
-            continue;
-        }
-        distribute_cards(game->players[j]->player_info, game->deck, &game->deck_size);
-    }
 }
 
-// End game
-void end_game(struct game_session *game, struct client_session* sess)
-{
-    sess->wins++;
+// A small append-only result journal preserves account statistics across restarts.
+static void load_profile(struct client_session *sess) {
+    if (!sess->password) return;
+    sess->wins = sess->losses = 0;
+    // Guests have session-only statistics.
+    FILE *f = fopen("stats.txt", "r");
+    if (!f) return;
+    char name[USERNAME_LEN]; int win;
+    while (fscanf(f, "%63s %d", name, &win) == 2) {
+        if (!strcmp(name, sess->username)) {
+            if (win) sess->wins++; else sess->losses++;
+        }
+    }
+    fclose(f);
+}
+static void send_profile(struct client_session *sess) {
+    char msg[160];
+    snprintf(msg, sizeof(msg), "#profile %s %d %d\n", sess->username, sess->wins, sess->losses);
+    session_send_string(sess->sd, msg);
+}
+static void record_result(struct client_session *sess, bool won) {
+    if (won) sess->wins++; else sess->losses++;
+    if (sess->password) {
+        FILE *f = fopen("stats.txt", "a");
+        if (f) { fprintf(f, "%s %d\n", sess->username, won); fclose(f); }
+        else perror("Cannot persist statistics");
+    }
+    send_profile(sess);
+}
+void end_game(struct game_session *game, struct client_session *winner) {
+    if (!game->is_started) return; // Exactly one result per match.
     game->is_started = false;
-    
-    for (int i = 0; i < game->player_count; i++) {
-        game->players[i]->state = fsm_interaction;
-        if (game->players[i]) {
-            if (game->players[i]->sd == sess->sd) {
-                session_send_string(game->players[i]->sd, "GAME OVER! YOU WIN!\n");
-            } else {
-                session_send_string(game->players[i]->sd, "GAME OVER! YOU LOSE!\n");
-            }
-        }
+    char msg[160];
+    snprintf(msg, sizeof(msg), "#game_end %d\n", winner->player_info->id);
+    for (int i = 0; i < game->player_count; ++i) {
+        record_result(game->players[i], game->players[i] == winner);
+        session_send_string(game->players[i]->sd, msg);
     }
-    
-    for (int i = 0; i < game->player_count; i++) {
-        if (game->players[i] && game->players[i]->player_info->hand) {
-            free(game->players[i]->player_info->hand);
-            game->players[i]->player_info->hand = NULL;
+}
+static void send_roster(struct game_session *game) {
+    char msg[160];
+    for (int i = 0; i < game->player_count; ++i) {
+        snprintf(msg, sizeof(msg), "#lobby %d\n", game->player_count);
+        session_send_string(game->players[i]->sd, msg);
+        for (int j = 0; j < game->player_count; ++j) {
+            snprintf(msg, sizeof(msg), "#player %d %s %d\n", j,
+                     game->players[j]->username, game->players[j]->player_info->card_count);
+            session_send_string(game->players[i]->sd, msg);
         }
     }
 }
+static void leave_game(struct server_str *serv, struct client_session *sess) {
+    int id = sess->player_info->game_id;
+    if (id < 0 || id >= serv->games_array_size || !serv->games_array[id]) return;
+    struct game_session *g = serv->games_array[id];
+    if (g->is_started) {
+        // Leaving forfeits the match. All remaining players win.
+        g->is_started = false;
+        for (int i = 0; i < g->player_count; ++i) {
+            record_result(g->players[i], g->players[i] != sess);
+            session_send_string(g->players[i]->sd,
+                g->players[i] == sess ? "#game_end -1\n" : "#game_end -2\n");
+        }
+    }
+    int index = sess->player_info->id;
+    for (int i = index; i + 1 < g->player_count; ++i) {
+        g->players[i] = g->players[i+1];
+        g->players[i]->player_info->id = i;
+    }
+    g->players[--g->player_count] = NULL;
+    free(sess->player_info->hand);
+    sess->player_info->hand = NULL;
+    sess->player_info->card_count = 0;
+    sess->player_info->game_id = -1;
+    sess->state = fsm_interaction;
+    session_send_string(sess->sd, "#left\n");
+    g->attacking_player = g->defending_player = NULL;
+    if (!g->player_count) {
+        free(g->name); free(g->players); free(g); serv->games_array[id] = NULL;
+    } else send_roster(g);
+}
+static void start_game(struct game_session *g, struct client_session *sess) {
+    if (g->is_started || g->player_count < 2 || g->players[0] != sess) {
+        send_error(sess->sd, "Only the host can start with at least two players"); return;
+    }
+    g->deck_size = MAX_CARDS;
+    g->pairs_count = g->undefended_count = 0;
+    for (int i = 0; i < MAX_CARDS; ++i) { g->deck[i] = i; g->table_cards[i] = -1; }
+    for (int i = 0; i < g->player_count; ++i) {
+        free(g->players[i]->player_info->hand);
+        g->players[i]->player_info->hand = NULL;
+        g->players[i]->player_info->card_count = 0;
+    }
+    shuffle_deck(g->deck, g->deck_size);
+    g->trump_card = g->deck[0];
+    g->attacking_player = g->players[0]; g->defending_player = g->players[1];
+    deal_cards(g); g->is_started = true;
+    send_game_start(g); send_turn_info(g); send_table_gui(g);
+}
+
+
 
 // Update defending player
 void update_defending_player(struct game_session* game) {
@@ -502,7 +578,7 @@ void take_table_cards(struct game_session *game)
     struct player_str *defender = game->defending_player->player_info;
     int new_card_count = defender->card_count + table_cards_count;
 
-    int *new_hand = malloc((new_card_count+1) * sizeof(int));
+    int *new_hand = malloc((MAX_CARDS + 1) * sizeof(int));
     if (!new_hand) {
         fprintf(stderr, "Failed to allocate memory for defender's hand.\n");
         return;
@@ -516,7 +592,7 @@ void take_table_cards(struct game_session *game)
 
     for (int i = 0; i < game->pairs_count*2; i++) {
         if(game->table_cards[i] != -1) {
-            defender->hand[defender->card_count + i] = game->table_cards[i];
+            defender->hand[defender->card_count++] = game->table_cards[i];
         }
         game->table_cards[i] = -1;
     }
@@ -537,7 +613,7 @@ void send_game_start(struct game_session *game) {
     int i;
     
     // Format trump suit: ^, v, #, %
-    const char *suits = "^v#%";
+    const char *suits = "^v%#";
     char trump_suit = suits[game->trump_card / 13];
     
     for (i = 0; i < game->player_count; i++) {
@@ -566,7 +642,7 @@ void send_game_start(struct game_session *game) {
         // Send cards to current player
         offset += snprintf(buffer + offset, sizeof(buffer) - offset, "#your_cards");
         for (int k = 0; k < game->players[i]->player_info->card_count; k++) {
-            char card_str[game->players[i]->player_info->card_count];
+            char card_str[6];
             format_card(game->players[i]->player_info->hand[k], card_str);
             offset += snprintf(buffer + offset, sizeof(buffer) - offset, " %s", card_str);
         }
@@ -614,7 +690,7 @@ void send_table_gui(struct game_session *game) {
             continue;
         }
     
-        printf("i = %d\n", i);
+
         
         offset = 0;
 
@@ -632,7 +708,7 @@ void send_table_gui(struct game_session *game) {
             
             format_card(game->table_cards[j*2], attack_card);
             
-            if ((game->table_cards[j*2+1]) && (game->table_cards[j*2+1] != -1)) {
+            if (game->table_cards[j*2+1] != -1) {
                 format_card(game->table_cards[j*2+1], defense_card);
             }
             
@@ -643,7 +719,7 @@ void send_table_gui(struct game_session *game) {
         if(game->players[i]->player_info->hand != NULL) {
             offset += snprintf(buffer + offset, sizeof(buffer) - offset, "#your_cards");
             for (int k = 0; k < game->players[i]->player_info->card_count; k++) {
-                char card_str[game->players[i]->player_info->card_count];
+                char card_str[6];
                 format_card(game->players[i]->player_info->hand[k], card_str);
                 offset += snprintf(buffer + offset, sizeof(buffer) - offset, " %s", card_str);
             }
@@ -652,7 +728,7 @@ void send_table_gui(struct game_session *game) {
         session_send_string(game->players[i]->sd, buffer);
 
         
-        session_send_string(game->players[i+d]->sd, buffer);
+
     }
 }
 
@@ -711,231 +787,93 @@ void send_error(int sd, const char *message) {
 
 // Parse card command
 int parse_card_command(const char *line, int *cards, int max_cards, int *pos) {
-    const char *ptr = line;
-    int count = 0;
-    
-    // Skip command (#attack or #defend)
-    while (*ptr && *ptr != ' ') ptr++;
-    if (*ptr == ' ') ptr++;
-    
-    // Parse cards
-    while (((*ptr != ' ') && (*ptr != '\0')) && (count < max_cards)) {
-        char rank[3] = {0};
-        char suit;
-        int rank_idx = 0;
-        
-        // Read rank (can be 1 or 2 characters)
-        while (*ptr && *ptr != '^' && *ptr != 'v' && *ptr != '#' && *ptr != '%' && *ptr != ' ') {
-            if (rank_idx < 2) {
-                rank[rank_idx++] = *ptr;
-            }
-            ptr++;
+    char copy[INBUFSIZE]; snprintf(copy, sizeof(copy), "%s", line);
+    char *save = NULL; char *token = strtok_r(copy, " ", &save);
+    int n = 0;
+    if (pos) *pos = -1;
+    while ((token = strtok_r(NULL, " ", &save))) {
+        int found = -1;
+        for (int c = 0; c < MAX_CARDS; ++c) {
+            char text[6]; format_card(c, text);
+            if (!strcmp(text, token)) { found = c; break; }
         }
-        
-        // Read suit
-        if (*ptr == '^' || *ptr == 'v' || *ptr == '#' || *ptr == '%') {
-            suit = *ptr;
-            ptr++;
-            
-            // Convert card to index
-            int rank_value = -1;
-            if (strcmp(rank, "2") == 0) rank_value = 0;
-            else if (strcmp(rank, "3") == 0) rank_value = 1;
-            else if (strcmp(rank, "4") == 0) rank_value = 2;
-            else if (strcmp(rank, "5") == 0) rank_value = 3;
-            else if (strcmp(rank, "6") == 0) rank_value = 4;
-            else if (strcmp(rank, "7") == 0) rank_value = 5;
-            else if (strcmp(rank, "8") == 0) rank_value = 6;
-            else if (strcmp(rank, "9") == 0) rank_value = 7;
-            else if (strcmp(rank, "10") == 0) rank_value = 8;
-            else if (strcmp(rank, "J") == 0) rank_value = 9;
-            else if (strcmp(rank, "Q") == 0) rank_value = 10;
-            else if (strcmp(rank, "K") == 0) rank_value = 11;
-            else if (strcmp(rank, "A") == 0) rank_value = 12;
-            
-            int suit_value = -1;
-            if (suit == '^') suit_value = 0;
-            else if (suit == 'v') suit_value = 1;
-            else if (suit == '%') suit_value = 2;
-            else if (suit == '#') suit_value = 3;
-            
-            if (rank_value >= 0 && suit_value >= 0) {
-                cards[count++] = suit_value * 13 + rank_value;
-            }
-        }
+        if (found >= 0 && n < max_cards && (!pos || *pos == -1)) cards[n++] = found;
+        else if (pos && n == 1 && *pos == -1) {
+            char *end; long v = strtol(token, &end, 10);
+            if (*end || v < 0 || v >= 6) return 0;
+            *pos = (int)v;
+        } else return 0;
     }
-    
-    while (*ptr == ' ') ptr++;
-
-    if(pos != NULL) {
-        int num = 0;
-        while(*ptr != '\0') {
-            num = num * 10 + (*ptr - 48);
-            ptr++;
-        }
-        *pos = num;
-    }
-    return count;
+    return n;
 }
-
-
-
-// Handle attack command
-int handle_attack_command(struct server_str *serv, struct game_session *game, 
-                          struct client_session *sess, const char *line) {
-    int cards[6] = {-1, -1, -1, -1, -1, -1};
-    int i;
-    bool can_be_placed = false;
-    int card_count = parse_card_command(line, cards, 6, NULL);
-    
-    if (card_count == 0) {
-        send_error(sess->sd, "No valid cards specified");
-        return 1;
+static bool owns_card(struct client_session *s, int card) {
+    for (int i = 0; i < s->player_info->card_count; ++i)
+        if (s->player_info->hand[i] == card) return true;
+    return false;
+}
+static void remove_card(struct client_session *s, int card) {
+    struct player_str *p = s->player_info;
+    for (int i = 0; i < p->card_count; ++i) if (p->hand[i] == card) {
+        memmove(p->hand+i, p->hand+i+1, (--p->card_count-i)*sizeof(int)); return;
     }
-    
-    // Check if this is attacking player or if first attack
-    if ((sess != game->attacking_player) && (game->pairs_count < 1)) {
-        send_error(sess->sd, "Not your turn to attack");
-        return 1;
+}
+int handle_attack_command(struct server_str *serv, struct game_session *g,
+                          struct client_session *s, const char *line) {
+    (void)serv;
+    int cards[6], n = parse_card_command(line, cards, 6, NULL);
+    if (!n || s == g->defending_player || (!g->pairs_count && s != g->attacking_player) ||
+        g->pairs_count+n > 6 || g->undefended_count+n > g->defending_player->player_info->card_count) {
+        send_error(s->sd, "Invalid attack or too many cards"); return 1;
     }
-    
-    // Check player has these cards
-    for (i = 0; i < card_count; i++) {
-        int found = 0;
-        for (int j = 0; j < sess->player_info->card_count; j++) {
-            if (sess->player_info->hand[j] == cards[i]) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            send_error(sess->sd, "You don't have this card");
-            return 1;
+    // Validate the entire move before changing any state.
+    for (int i = 0; i < n; ++i) {
+        bool rank_ok = g->pairs_count == 0 && cards[i]%13 == cards[0]%13;
+        for (int j = 0; j < g->pairs_count*2; ++j)
+            if (g->table_cards[j] >= 0 && g->table_cards[j]%13 == cards[i]%13) rank_ok = true;
+        for (int j = 0; j < i; ++j) if (cards[j] == cards[i]) rank_ok = false;
+        if (!rank_ok || !owns_card(s, cards[i])) {
+            send_error(s->sd, "Invalid rank, duplicate or unowned card"); return 1;
         }
     }
-    
-    if(game->pairs_count == 0) {
-        can_be_placed = true;
-    } else {
-        for(i = 0; i < (game->pairs_count * 2); i++) {
-            if((game->table_cards[i] % 13) == (cards[0] % 13)) {
-                can_be_placed = true;
-                break;
-            }
-        }
+    for (int i = 0; i < n; ++i) {
+        g->table_cards[g->pairs_count*2] = cards[i];
+        g->table_cards[g->pairs_count++*2+1] = -1;
+        g->undefended_count++; remove_card(s, cards[i]);
     }
-    
-    if(can_be_placed == false) {
-        send_error(sess->sd, "You can't place this card");
+    send_table_gui(g);
+    if (!s->player_info->card_count) end_game(g, s);
+    return 0;
+}
+int handle_defend_command(struct server_str *serv, struct game_session *g,
+                         struct client_session *s, const char *line) {
+    (void)serv;
+    int cards[6], pair = -1, n = parse_card_command(line, cards, 6, &pair);
+    if (n != 1 || pair < 0 || pair >= g->pairs_count || s != g->defending_player ||
+        g->table_cards[pair*2+1] != -1 || !owns_card(s, cards[0])) {
+        send_error(s->sd, "Specify one owned card and an undefended pair index"); return 1;
     }
-    
-    // Add cards to table or queue
-    for (int i = 0; i < card_count; i++) {
-        if (game->pairs_count == 0 || sess == game->attacking_player) {
-            game->table_cards[game->pairs_count*2] = cards[i];
-            game->pairs_count++;
-        }
-        
-        // Remove card from player's hand
-        for (int j = 0; j < sess->player_info->card_count; j++) {
-            if (sess->player_info->hand[j] == cards[i]) {
-                memmove(&sess->player_info->hand[j],
-                       &sess->player_info->hand[j + 1],
-                       (sess->player_info->card_count - j - 1) * sizeof(int));
-                sess->player_info->card_count--;
-                break;
-            }
-        }
+    int c = cards[0], a = g->table_cards[pair*2];
+    if (!((c/13 == a/13 && c%13 > a%13) || (c/13 == g->trump_card/13 && a/13 != c/13))) {
+        send_error(s->sd, "Cannot defend with this card"); return 1;
     }
-    game->undefended_count++;
-    
-    send_table_gui(game);
+    g->table_cards[pair*2+1] = c; g->undefended_count--; remove_card(s, c);
+    send_table_gui(g);
+    if (!s->player_info->card_count) end_game(g, s);
     return 0;
 }
 
-// Handle defend command
-int handle_defend_command(struct server_str *serv, struct game_session *game,
-                         struct client_session *sess, const char *line) {
-    int cards[6];
-    int pair_num = -1;
-    int card_count = parse_card_command(line, cards, 6, &pair_num);
-    if(pair_num == -1) {
-        perror("#defend");
-    }
 
-    
-    if (card_count == 0) {
-        send_error(sess->sd, "No valid cards specified");
-        return 1;
-    }
-    
-    // Check if this is defending player
-    if (sess != game->defending_player) {
-        send_error(sess->sd, "You are not defending");
-        return 1;
-    }
-    
-    // Check there are cards to defend
-    if (game->undefended_count == 0) {
-        send_error(sess->sd, "No cards to defend against");
-        return 1;
-    }
-    
-    int trump_suit = game->trump_card / 13;
-    
-    int attack_card;
-    attack_card = game->table_cards[pair_num * 2];
-    int attack_rank = attack_card % 13;
-    int attack_suit = attack_card / 13;
-    
-    // Defend with each card
-    for (int i = 0; i < card_count; i++) {
-        int card = cards[i];
-        int card_rank = card % 13;
-        int card_suit = card / 13;
-        
-        // Check if can defend with this card
-        bool can_defend = false;
-        if (card_suit == attack_suit && card_rank > attack_rank) {
-            can_defend = true;
-        } else if (card_suit == trump_suit && attack_suit != trump_suit) {
-            can_defend = true;
-        }
-        
-        if (can_defend == false) {
-            send_error(sess->sd, "Cannot defend with this card");
-            return 1;
-        }
-        
-        // Add card to table
-        game->table_cards[pair_num*2 + 1] = card;
-        game->undefended_count--;
-        
-        // Remove card from hand
-        for (int j = 0; j < sess->player_info->card_count; j++) {
-            if (sess->player_info->hand[j] == card) {
-                memmove(&sess->player_info->hand[j],
-                       &sess->player_info->hand[j + 1],
-                       (sess->player_info->card_count - j - 1) * sizeof(int));
-                sess->player_info->card_count--;
-                break;
-            }
-        }
-    }
-
-    
-    send_table_gui(game);
-    return 0;
-}
 
 // Handle take command
 void handle_take_command(struct server_str *serv, struct game_session *game,
                         struct client_session *sess) {
+    (void)serv;
     if (sess != game->defending_player) {
         send_error(sess->sd, "You are not defending");
         return;
     }
     
+    if (!game->undefended_count) { send_error(sess->sd, "No cards to take"); return; }
     take_table_cards(game);
     send_round_end(game, "taken");
     
@@ -948,10 +886,9 @@ void handle_take_command(struct server_str *serv, struct game_session *game,
     
     // Shift turn
     deal_cards(game);
-    update_defending_player(game);
-    update_defending_player(game);
-    update_attacking_player(game);
-    update_attacking_player(game);
+    int next = (game->defending_player->player_info->id + 1) % game->player_count;
+    game->attacking_player = game->players[next];
+    game->defending_player = game->players[(next + 1) % game->player_count];
     
     send_turn_info(game);
     send_table_gui(game);
@@ -960,8 +897,9 @@ void handle_take_command(struct server_str *serv, struct game_session *game,
 // Handle pass command
 void handle_pass_command(struct server_str *serv, struct game_session *game,
                         struct client_session *sess) {
+    (void)serv;
     // Check all cards are defended
-    if ((sess == game->defending_player) && (game->undefended_count > 0)) {
+    if (game->undefended_count > 0 || sess != game->attacking_player) {
         send_error(sess->sd, "Not all cards are defended");
         return;
     }
@@ -995,26 +933,6 @@ void handle_pass_command(struct server_str *serv, struct game_session *game,
 
 static void session_game_gui(struct server_str* serv, struct game_session *game, 
                             struct client_session* sess, char *line) {
-    // Check for game end
-    for (int i = 0; i < game->player_count; i++) {
-        if (game->players[i] != NULL && 
-            game->players[i]->player_info->card_count == 0 &&
-            game->deck_size == 0) {
-            char buffer[128];
-            snprintf(buffer, sizeof(buffer), "#game_end %d\n", 
-                    game->players[i]->player_info->id);
-            
-            for (int j = 0; j < game->player_count; j++) {
-                if (game->players[j] != NULL) {
-                    session_send_string(game->players[j]->sd, buffer);
-                }
-            }
-            
-            end_game(game, game->players[i]);
-            return;
-        }
-    }
-    
     // Process commands
     if (strncmp(line, "#attack", 7) == 0) {
         printf("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nATTACK\n%s\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", line);
@@ -1037,6 +955,32 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
     int res, i;
     char message[256];
     
+    if (sess->state == fsm_game || sess->state == fsm_interaction) {
+        if (!strcmp(line, "#profile")) { load_profile(sess); send_profile(sess); free(line); return; }
+        if (sess->state == fsm_game && (!strcmp(line, "#leave") || !strcmp(line, "#back"))) {
+            leave_game(serv, sess); free(line); return;
+        }
+        if (sess->state == fsm_game && !strncmp(line, "#chat ", 6)) {
+            struct game_session *g = serv->games_array[sess->player_info->game_id];
+            char chat[512];
+            if (strlen(line+6) > 240 || !line[6]) send_error(sess->sd, "Chat: use 1 to 240 bytes");
+            else {
+                for (char *c = line+6; *c; ++c) if ((unsigned char)*c < 32) *c = ' ';
+                snprintf(chat, sizeof(chat), "#chat <%s> %s\n", sess->username, line+6);
+                for (int j = 0; j < g->player_count; ++j) session_send_string(g->players[j]->sd, chat);
+            }
+            free(line); return;
+        }
+    }
+    if (strcmp(line, "#back") && (sess->state == fsm_signup_username || sess->state == fsm_login_username)) {
+        bool valid = strlen(line) > 0 && strlen(line) <= 49;
+        for (const char *c = line; *c; ++c)
+            if (!isalnum((unsigned char)*c) && *c != '_' && *c != '-') valid = false;
+        if (!valid) { session_send_string(sess->sd, "Username: use 1-49 letters, digits, _ or -.\n"); free(line); return; }
+    }
+    if (strcmp(line, "#back") && sess->state == fsm_signup_password && (!*line || strlen(line) > 49 || strchr(line, ';'))) {
+        session_send_string(sess->sd, "Password: use 1-49 characters without semicolons.\n"); sess->state = fsm_signup_username; free(line); return;
+    }
     if(strcmp(line, "#back") == 0) {
         free(line);
         switch (sess->state) {
@@ -1068,8 +1012,10 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
             }
             else if (strcmp(line, "3") == 0) {
                 sess->state = fsm_interaction;
+                free(sess->username); free(sess->password); sess->password = NULL;
+                sess->wins = sess->losses = 0;
                 sess->username = malloc(USERNAME_LEN);
-                snprintf(sess->username, USERNAME_LEN, "Guest%ld", time(NULL));
+                snprintf(sess->username, USERNAME_LEN, "Guest%ld_%d", time(NULL), sess->sd);
                 session_send_string(sess->sd, sess->username);
                 session_send_string(sess->sd, "\n");
             }
@@ -1079,7 +1025,7 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
         
     case fsm_login_username:
         if (line) {
-            sess->username = line;
+            free(sess->username); sess->username = line;
         }
         sess->state = fsm_login_password;
         session_send_string(sess->sd, "Login username, OK\n");
@@ -1087,15 +1033,25 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
         
     case fsm_login_password:
         if (line) {
-            sess->password = line;
+            free(sess->password); sess->password = line;
         }
         res = authenticate_user(f, sess->username, sess->password);
         if (res == 0) {
+            for (int j = 0; j < serv->sess_array_size; ++j) {
+                struct client_session *other = serv->sess_array[j];
+                if (other && other != sess && other->username &&
+                    (other->state == fsm_game || other->state == fsm_interaction) &&
+                    !strcmp(other->username, sess->username)) {
+                    session_send_string(sess->sd, "This account is already online.\n"); sess->state = fsm_login_username; return;
+                }
+            }
             session_send_string(sess->sd, "You have been successfully logged into the system.\n");
             sess->state = fsm_interaction;
+            load_profile(sess);
         }
         else if (res == 1) {
-            sess->state = fsm_login_password;
+            sess->state = fsm_login_username;
+            session_send_string(sess->sd, "Incorrect password.\n");
         }
         else {
             session_send_string(sess->sd, "This user is not registered in the system yet.\n");
@@ -1112,7 +1068,7 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
                 break;
             } else {
                 session_send_string(sess->sd, "Sign up username, OK\n");
-                sess->username = line;
+                free(sess->username); sess->username = line;
             }
         } else {
             break;
@@ -1122,7 +1078,7 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
         
     case fsm_signup_password:
         if (line) {
-            sess->password = line;
+            free(sess->password); sess->password = line;
             session_send_string(sess->sd, "You have been successfully Sign up to the system.\n");
         } else {
             break;
@@ -1151,42 +1107,14 @@ static void session_fsm_step(struct server_str* serv, struct client_session* ses
         free(line);
         break;
         
-    case fsm_game:
-        if(serv->games_array[sess->player_info->game_id]->is_started == true) {
-            session_game_gui(serv, serv->games_array[sess->player_info->game_id], sess, line);
-        } else {
-            if(strcmp(line, "#game_start") == 0) {
-                struct game_session *game = serv->games_array[sess->player_info->game_id];
+    case fsm_game: {
+        struct game_session *g = serv->games_array[sess->player_info->game_id];
+        if (!strcmp(line, "#game_start") || !strcmp(line, "#restart")) start_game(g, sess);
+        else if (g->is_started) session_game_gui(serv, g, sess, line);
+        else send_error(sess->sd, "The match is not active");
+        free(line); break;
+    }
 
-                game->is_started = true;
-                game->attacking_player = game->players[0];
-                game->defending_player = game->players[1];
-
-                shuffle_deck(game->deck, game->deck_size);
-                deal_cards(game);
-
-                /* Trump card */
-                game->trump_card = game->deck[0];
-                memmove(
-                    game->deck,
-                    game->deck + 1,
-                    (game->deck_size - 1) * sizeof(*game->deck)
-                );
-                game->deck[game->deck_size - 1] = game->trump_card;
-    
-                for (int i = 0; i < MAX_CARDS; i++) {
-                    game->table_cards[i] = -1;
-                }
-
-                /* Notify clients */
-                send_game_start(game);
-                send_turn_info(game);
-                send_table_gui(game);
-            }
-        }
-        free(line);
-        break;
-        
     case fsm_finish:
     case fsm_error:
         free(line);
@@ -1243,59 +1171,18 @@ static int server_init(struct server_str* serv, int port)
     return 0;
 }
 
-static void server_remove_session(struct server_str* serv, int sd)
-{
+static void server_remove_session(struct server_str* serv, int sd) {
     struct client_session *client = serv->sess_array[sd];
-    printf("Client with socket %d disconect\n", serv->sess_array[sd]->sd);
-    if (client != NULL) {
-        close(sd);
-        client->sd = -1;
-        struct game_session *game = serv->games_array[client->player_info->game_id];
-
-        if(client->player_info->game_id != -1) {
-            int i;
-            for(i = 0; game->players[i] != client; i++) {}
-            game->players[i] = NULL;
-        }
-        if(client->player_info->game_id != -1) {
-            game->player_count--;   
-            if(game->player_count == 0) { 
-                free(game->name);    
-                game->name = NULL;
-
-                free(game->players); 
-                game->players = NULL;
-
-                free(game);          
-                game = NULL;         
-
-                serv->games_array[client->player_info->game_id] = NULL;
-            }
-            if(client->player_info->hand != NULL) {
-                free(client->player_info->hand);
-                client->player_info->hand = NULL;
-            }
-        }
-        free(client->player_info);
-        client->player_info = NULL;
-
-        free(client->username);
-        client->username = NULL;
-
-        free(client->password);
-        client->password = NULL;
-
-        free(client);
-        serv->sess_array[sd] = NULL;
-        client = NULL;
-    } else {
-        printf("serv->sess_array[sd] = NULL\n");
-    }
-    return;
+    if (!client) return;
+    leave_game(serv, client);
+    close(sd);
+    free(client->player_info); free(client->username); free(client->password); free(client);
+    serv->sess_array[sd] = NULL;
 }
 
 static void session_commit(struct client_session* sess, FILE* f)
 {
+    fseek(f, 0, SEEK_END);
     unsigned int ip = sess->from_ip;
     fprintf(f, "From %d.%d.%d.%d:%d; "
         "Username: %s; Password: %s\n",
@@ -1321,8 +1208,6 @@ static void session_check_lf(struct server_str* serv, struct client_session* ses
     line = malloc(pos + 1);
     memcpy(line, sess->buf, pos);
     line[pos] = 0;
-    printf("recived from socket %d: %s\n", sess->sd, line);
-    printf("\n\n\n\n\n\n\n\n\n\n\n\nSESS->BD = %d\nBUFFER BEFORE ====>> [%s]\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", sess->bd, sess->buf);
     sess->bd -= (pos + 1);
     memmove(sess->buf, sess->buf+pos+1, sess->bd);
 
@@ -1330,8 +1215,7 @@ static void session_check_lf(struct server_str* serv, struct client_session* ses
         memmove(sess->buf, sess->buf + 1, --sess->bd);
     }
 
-    printf("\n\n\n\n\n\n\n\n\n\n\n\nSESS->BD = %d\nBUFFER AFTER ====>> [%s]\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", sess->bd, sess->buf);
-    if (line[pos - 1] == '\r')
+    if (pos > 0 && line[pos - 1] == '\r')
         line[pos - 1] = 0;
     session_fsm_step(serv, sess, line, serv->file_account);  /* we transfer ownership! */
 }
@@ -1339,6 +1223,7 @@ static void session_check_lf(struct server_str* serv, struct client_session* ses
 
 static int session_do_read(struct server_str* serv, struct client_session* sess, FILE* f)
 {
+    (void)f;
     int rc, bufp = sess->bd;
     rc = recv(sess->sd, sess->buf + bufp, INBUFSIZE - bufp, 0);
     if (rc <= 0) {
@@ -1346,7 +1231,7 @@ static int session_do_read(struct server_str* serv, struct client_session* sess,
         return 0;   /* this means "don't continue" for the caller */
     }
     sess->bd += rc;
-    session_check_lf(serv, sess);
+    while (memchr(sess->buf, '\n', sess->bd)) session_check_lf(serv, sess);
     if (sess->bd >= INBUFSIZE) {
         /* we can't read further, no room in the buffer, no whole line yet */
         session_send_string(sess->sd, "Line too long! Good bye...\n");
@@ -1369,6 +1254,7 @@ static void server_accept_client(struct server_str* serv)
         return;
     }
 
+    if (sd >= FD_SETSIZE) { close(sd); return; }
     if (sd >= serv->sess_array_size) {  /* need to resize */
         int newlen = serv->sess_array_size;
         while (sd >= newlen)
@@ -1386,23 +1272,23 @@ static void server_accept_client(struct server_str* serv)
 
 int server_go(struct server_str* serv)
 {
-    fd_set readfds, writefds;
+    fd_set readfds;
     int i, sr, ssr, maxfd;
     for (;;) { /* ========= THE APPLICATION MAIN LOOP ========= */
         FD_ZERO(&readfds);
-        FD_ZERO(&writefds);
+
         FD_SET(serv->ls, &readfds);
         maxfd = serv->ls;
         for (i = 0; i < serv->sess_array_size; i++) {
             if (serv->sess_array[i]) {
                 FD_SET(i, &readfds);
-                FD_SET(i, &writefds);
+
                 if (i > maxfd) {
                     maxfd = i;
                 }
             }
         }
-        sr = select(maxfd + 1, &readfds, &writefds, NULL, NULL);
+        sr = select(maxfd + 1, &readfds, NULL, NULL, NULL);
         if (sr == -1) {
             perror("select");
             return 4;
@@ -1422,14 +1308,11 @@ int server_go(struct server_str* serv)
 }
 
 // Main server function
-int main(int argc, char *argv[]) {
+int main(void) {
     struct server_str server;
     
-    if(argc < 2) {
-        fprintf(stderr, "Usage: ./server <file_name>\n");
-        return 1;
-    }
-    
+    srand((unsigned)time(NULL));
+    signal(SIGPIPE, SIG_IGN);
     // Server socket initialization
     if (server_init(&server, port) != 0) {
         fprintf(stderr, "Failed to initialize server\n");

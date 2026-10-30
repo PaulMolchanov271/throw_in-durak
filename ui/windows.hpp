@@ -161,7 +161,7 @@ public:
 // Parse games from server response
 //////////////////////////////////////////////
 
-void parse_games(const char* msg, Game **games, int& games_count);
+void parse_games(const char* msg, std::vector<Game*>& games);
 
 //////////////////////////////////////////////
 // List games button
@@ -170,7 +170,7 @@ void parse_games(const char* msg, Game **games, int& games_count);
 class ListGamesButton : public OOFLButton {
     AppState& state;
     Server& server;
-    Game **games;
+    std::vector<Game*> games;
     int game_count;
     char *msg;
     int i;

@@ -16,7 +16,7 @@
 
 // Enhanced CardWidget with smart attack/defense detection
 class CardWidget : public Fl_Box {
-    Fl_PNG_Image* img;
+    Fl_Image* img;
     Card card_data;
     bool selected;
     bool dragging;
@@ -57,18 +57,22 @@ class GameWindow : public Fl_Window {
     Fl_Button* defend_btn = nullptr;
     Fl_Button* take_btn = nullptr;
     Fl_Button* pass_btn = nullptr;
-    Fl_Box* status_label;
-    Fl_Box* trump_box;
-    Fl_Box* drop_zone;
-    CardWidget* highlighted_target;
+    Fl_Multiline_Output* chat_output = nullptr;
+    Fl_Input* chat_input = nullptr;
+    std::string chat_history;
+    Fl_Box* status_label = nullptr;
+    Fl_Box* trump_box = nullptr;
+    Fl_Box* drop_zone = nullptr;
+    CardWidget* highlighted_target = nullptr;
     
 public:
     GameWindow(Server& srv, AppState& st);
 
-    ~GameWindow() { delete game; }
+    ~GameWindow() = default;
 
     Game *GetGame() { return game; }
     
+    void AppendChat(const std::string& text);
     void initUI();
     void clearUI();
     
